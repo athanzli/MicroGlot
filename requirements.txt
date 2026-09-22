@@ -1,0 +1,29 @@
+# Runtime dependencies for MicroGlot.
+#
+#   pip install -r requirements.txt
+#
+# transformers is pinned: later releases have shown a bfloat16 NaN issue with
+# this model. The remaining packages are left unpinned because the project does
+# not pin them; any version compatible with transformers 4.51.3 works.
+
+torch
+transformers==4.51.3
+tokenizers
+huggingface_hub
+
+# Required by the taxonomy scripts (Poincare embedding construction) and by the
+# species lookup table; not needed to run the model itself.
+numpy
+pandas
+
+# Optional
+# ---------
+# flash-attn   fused rotary kernel used during pretraining. Without it the model
+#              falls back to an equivalent pure-PyTorch implementation.
+#
+# Only for benchmarks/baselines.py (reproducing the baseline embeddings):
+# einops       required by the custom modelling code that the DNABERT / NT /
+#              ProkBERT checkpoints load with trust_remote_code=True
+# pyyaml       used to rewrite an Evo2 config so it loads without Transformer
+#              Engine
+# evo2         the Evo2 baseline only; pulls in its `vortex` dependency

@@ -1,0 +1,27 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / packaging artefacts
+build/
+dist/
+*.egg-info/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Large assets: download the weights, tokenizer and species tables from the
+# HuggingFace repository rather than committing them here.
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.npz
+*.h5
+
+# Editor / OS noise
+.ipynb_checkpoints/
+.DS_Store
