@@ -8,6 +8,8 @@ fungi, protists, viruses and plasmids. It encodes the taxonomic hierarchy as hyp
 embeddings learned independently of the language-modelling objective, and uses them both as an input
 token and to steer expert routing.
 
+For details, see [our manuscript: A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1).
+
 **Model weights, the tokenizer and the species assets live on Hugging Face:**
 [huggingface.co/athanzli/MicroGlot](https://huggingface.co/athanzli/MicroGlot)
 
@@ -104,13 +106,17 @@ The model weights and species assets on Hugging Face are released under
 
 ## Citation
 
-A preprint is in preparation. Until then:
+If you use MicroGlot, please cite [our manuscript: A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1):
+
+> Li, A. Z., Wang, S., Cheng, S., Du, Y. & Liu, R. A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics. *bioRxiv* (2026). https://doi.org/10.64898/2026.09.22.753215
 
 ```bibtex
-@software{li_microglot,
-  author = {Li, Athan Z.},
-  title  = {MicroGlot: a taxonomy-informed sparse DNA foundation model for microbial genomics},
-  year   = {2026},
-  url    = {https://github.com/athanzli/MicroGlot}
+@article{li2026microglot,
+  author  = {Li, Athan Z. and Wang, Shiyuan and Cheng, Shupeng and Du, Yuxuan and Liu, Ruishan},
+  title   = {A Taxonomy-Informed Sparse {DNA} Foundation Model for Microbial Genomics},
+  journal = {bioRxiv},
+  year    = {2026},
+  doi     = {10.64898/2026.09.22.753215},
+  url     = {https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1}
 }
 ```
