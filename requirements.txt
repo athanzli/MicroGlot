@@ -1,15 +1,15 @@
-# Runtime dependencies for MicroGlot.
+# Runtime dependencies for MicroGlot (Python 3.10 or newer).
 #
 #   pip install -r requirements.txt
 #
-# transformers is pinned: later releases have shown a bfloat16 NaN issue with
-# this model. The remaining packages are left unpinned because the project does
-# not pin them; any version compatible with transformers 4.51.3 works.
+# transformers is pinned to the tested release (4.50 to 4.57 give identical
+# outputs). torch 2.5 and 2.6 give different outputs and torch 2.4 cannot run
+# the model. hf_xet speeds up the weight download from Hugging Face.
 
-torch
+torch>=2.7
 transformers==4.51.3
 tokenizers
-huggingface_hub
+huggingface_hub[hf_xet]
 
 # Required by the taxonomy scripts (Poincare embedding construction) and by the
 # species lookup table; not needed to run the model itself.

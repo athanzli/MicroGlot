@@ -46,7 +46,10 @@ except ImportError:  # pragma: no cover
                 return
             self._seq_len_cached = seqlen
             t = torch.arange(seqlen, device=device, dtype=torch.float32)
-            freqs = torch.outer(t, self.inv_freq.to(device=device, dtype=torch.float32))
+            # Recompute inv_freq instead of reading the non-persistent buffer, which transformers>=5
+            # leaves uninitialised; rounding to the buffer's dtype keeps outputs identical to 4.51.3.
+            inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim))
+            freqs = torch.outer(t, inv_freq.to(self.inv_freq.dtype).to(device=device, dtype=torch.float32))
             self._cos_cached = torch.cos(freqs)
             self._sin_cached = torch.sin(freqs)
 
@@ -541,25 +544,16 @@ class GenomicAttention(nn.Module):
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
         
-        if self.config.use_flash_attention and query_states.is_cuda:
-            with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
-                attn_output = F.scaled_dot_product_attention(
-                    query_states,
-                    key_states,
-                    value_states,
-                    dropout_p=self.attention_dropout if self.training else 0.0,
-                    is_causal=True,
-                    enable_gqa=True,
-                )
-        else:
-            attn_output = F.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                dropout_p=self.attention_dropout if self.training else 0.0,
-                is_causal=True,
-                enable_gqa=True,
-            )
+        # SDPA picks the fastest kernel the GPU and dtype support: flash attention for bf16/fp16 on
+        # Ampere or newer, another kernel otherwise (forcing flash left fp32 and older GPUs without one).
+        attn_output = F.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            dropout_p=self.attention_dropout if self.training else 0.0,
+            is_causal=True,
+            enable_gqa=True,
+        )
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(batch_size, seq_len, self.num_query_heads * self.head_dim)
         attn_output = self.o_proj(attn_output)
@@ -910,6 +904,11 @@ class GenomicPreTrainedModel(PreTrainedModel):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.trunc_normal_(module.weight, std=0.02)
+        elif isinstance(module, RotaryEmbedding):
+            # inv_freq is a non-persistent buffer (not in the checkpoint): transformers>=5 re-creates it
+            # uninitialised after loading and relies on _init_weights to fill it.
+            dim, base = module.dim, float(module.base)
+            module.inv_freq.copy_(1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)))
     
     def to_bfloat16(self) -> "GenomicPreTrainedModel":
         """Convert model weights to bfloat16 for memory-efficient training."""
@@ -988,6 +987,11 @@ class GenomicModel(GenomicPreTrainedModel):
 
         if species_emb is not None:
             expected_dim = self.config.species_emb_dim
+            if expected_dim is None:
+                raise ValueError(
+                    "This checkpoint (MicroGlot-plain) takes no species information: drop species_emb, "
+                    "or load the repo-root MicroGlot checkpoint to condition on a species."
+                )
             if species_emb.dim() == 1:
                 species_emb = species_emb.unsqueeze(0)
             if species_emb.dim() != 2:

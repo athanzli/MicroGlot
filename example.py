@@ -26,5 +26,8 @@ print(f"cos(E. coli, S. cerevisiae): "
 states, _ = model.hidden_states(DNA, species="Escherichia coli")
 print(f"hidden states              : {len(states)} x {tuple(states[-1].shape)}")
 
+del model, states                  # free GPU memory before loading the second model
+torch.cuda.empty_cache()
+
 plain = MicroGlot.from_pretrained("athanzli/MicroGlot", variant="plain")
 print(f"plain embedding shape      : {tuple(plain.embed(DNA).shape)}")

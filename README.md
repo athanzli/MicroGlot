@@ -8,7 +8,7 @@ fungi, protists, viruses and plasmids. It encodes the taxonomic hierarchy as hyp
 embeddings learned independently of the language-modelling objective, and uses them both as an input
 token and to steer expert routing.
 
-For details, see [our manuscript: A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1).
+For details, see our manuscript, [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1).
 
 **Model weights, the tokenizer and the species assets live on Hugging Face:**
 [huggingface.co/athanzli/MicroGlot](https://huggingface.co/athanzli/MicroGlot)
@@ -21,10 +21,30 @@ This repository holds the source code. It deliberately contains no large binarie
 git clone https://github.com/athanzli/MicroGlot.git
 cd MicroGlot
 pip install -r requirements.txt
+python example.py   # smoke test; the first run downloads ~18 GB of weights from Hugging Face
 ```
+
+`microglot.py` is a helper module in this repository, not a pip package: run your code from the
+repository directory, or copy `microglot.py` next to your script or notebook.
+
+With an NVIDIA GPU, check that torch can use it:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+If this prints `False`, install torch for your driver from <https://pytorch.org/get-started/locally/>.
+Without a usable GPU, `microglot.py` runs on the CPU and says so.
 
 `flash-attn` is optional. Install it for the fastest rotary kernel; without it the model falls back to
 an equivalent pure-PyTorch implementation.
+
+### Requirements
+
+Python 3.10 or newer, torch 2.7 or newer (torch 2.5 and 2.6 give different outputs; torch 2.4 cannot
+run the model) and transformers 4.51.3 (4.50 to 4.57 give identical outputs). A 16 GB GPU holds one
+of the two models at a time. Download sizes, memory use and settings for older GPUs and CPUs are given
+in the [model card](https://huggingface.co/athanzli/MicroGlot).
 
 ## Quickstart
 
@@ -47,7 +67,8 @@ emb = model.embed(dna, species="ESCHERICHIA-COLI")
 # species unknown -> the built-in encoder infers one from the sequence
 emb = model.embed(dna)
 
-# no species information at all
+# no species information at all (both models loaded together take ~17 GiB of GPU memory;
+# on a 16 GB GPU, run `del model; import torch; torch.cuda.empty_cache()` first)
 plain = MicroGlot.from_pretrained("athanzli/MicroGlot", variant="plain")
 emb = plain.embed(dna)
 ```
@@ -61,10 +82,8 @@ len(states)          # 23, one per decoder layer: states[0] is layer 1, states[-
 emb = model.embed(dna, species="Escherichia coli", layer=11)   # decoder layer 11
 ```
 
-`python example.py` runs a short end-to-end demonstration.
-
-Full usage documentation, including the species assets and the standard `transformers` interface, is
-in the [model card](https://huggingface.co/athanzli/MicroGlot).
+Full usage documentation, including embedding your own FASTA files, the species assets and the
+standard `transformers` interface, is in the [model card](https://huggingface.co/athanzli/MicroGlot).
 
 ## Repository contents
 
@@ -106,7 +125,7 @@ The model weights and species assets on Hugging Face are released under
 
 ## Citation
 
-If you use MicroGlot, please cite [our manuscript: A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1):
+If you use MicroGlot, please cite our manuscript, [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1):
 
 > Li, A. Z., Wang, S., Cheng, S., Du, Y. & Liu, R. A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics. *bioRxiv* (2026). https://doi.org/10.64898/2026.09.22.753215
 
