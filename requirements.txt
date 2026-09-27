@@ -4,12 +4,15 @@
 #
 # transformers is pinned to the tested release (4.50 to 4.57 give identical
 # outputs). torch 2.5 and 2.6 give different outputs and torch 2.4 cannot run
-# the model. hf_xet speeds up the weight download from Hugging Face.
+# the model. hf_xet speeds up the weight download from Hugging Face. accelerate
+# is needed to load with from_pretrained(..., device_map="auto"), as in the
+# Hugging Face "Use this model" snippet.
 
 torch>=2.7
 transformers==4.51.3
 tokenizers
 huggingface_hub[hf_xet]
+accelerate
 
 # Required by the taxonomy scripts (Poincare embedding construction) and by the
 # species lookup table; not needed to run the model itself.

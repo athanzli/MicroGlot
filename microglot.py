@@ -152,11 +152,20 @@ class MicroGlot:
             return pd.read_csv(fh, sep="\t", dtype=str, keep_default_na=False)
 
     @staticmethod
-    def _prepare(sequences) -> list[str]:
+    def _prepare(sequences, stacklevel: int = 4) -> list[str]:
         """Bare upper-case sequences: FASTA line breaks, carriage returns and spaces are removed."""
         if isinstance(sequences, str):
             sequences = [sequences]
         seqs = ["".join(str(s).split()).upper() for s in sequences]
+        if not seqs:
+            raise ValueError("no sequences given")
+        empty = [i for i, s in enumerate(seqs) if not s]
+        if empty:
+            shown = ", ".join(map(str, empty[:5])) + (", ..." if len(empty) > 5 else "")
+            raise ValueError(
+                f"{len(empty)} of {len(seqs)} sequence(s) are empty or whitespace only (sequence "
+                f"{shown}); remove them first, e.g. empty FASTA records."
+            )
         bad = [i for i, s in enumerate(seqs) if not _DNA.issuperset(s)]
         if bad:
             s = seqs[bad[0]]
@@ -165,7 +174,7 @@ class MicroGlot:
                 f"{len(bad)} of {len(seqs)} sequence(s) contain non-DNA characters (sequence {bad[0]}: "
                 f"{s[j]!r} at position {j}); each is read as an N token. Pass bare sequences without "
                 "the FASTA '>' header line; for RNA, replace U with T.",
-                stacklevel=4,
+                stacklevel=stacklevel,
             )
         return seqs
 
@@ -189,9 +198,10 @@ class MicroGlot:
         if cut:
             total, kept = cut[0]
             warnings.warn(
-                f"{len(cut)} sequence(s) exceed the {CONTEXT:,}-token context (about 43 kb) and were "
-                f"truncated (e.g. only the first {kept:,} of {total:,} bp were used). Split longer "
-                "sequences, e.g. into 40 kb pieces, and pool the pieces yourself.",
+                f"{len(cut)} sequence(s) exceed the {CONTEXT:,}-token context (about 43 kb, less for "
+                f"N-rich DNA) and were truncated (e.g. only the first {kept:,} of {total:,} bp were "
+                "used). Cut longer sequences into pieces that fit with `model.split(sequence)`, and "
+                "pool the pieces yourself.",
                 stacklevel=4,
             )
 
@@ -287,3 +297,25 @@ class MicroGlot:
         h = states[layer - 1 if layer > 0 else layer].float()
         m = mask.unsqueeze(-1).to(h.dtype)
         return (h * m).sum(1) / m.sum(1).clamp(min=1)
+
+    def split(self, sequence: str, max_tokens: int = CONTEXT) -> list[str]:
+        """Cut one long sequence into contiguous pieces that each fit the context.
+
+        Pieces end at token boundaries and hold at most `max_tokens` tokens, [BOS] and [EOS]
+        included; joined, they give back the sequence (whitespace removed, upper-case). A fixed
+        length in bp does not always fit: each N or other ambiguity code is a token of its own.
+        """
+        if not isinstance(sequence, str):
+            raise TypeError("split takes one sequence (a str); call it once per sequence")
+        (seq,) = self._prepare(sequence, stacklevel=3)
+        room = max_tokens - self.tokenizer.num_special_tokens_to_add()
+        if room < 1 or max_tokens > CONTEXT:
+            raise ValueError(
+                f"max_tokens must be at most {CONTEXT:,} and leave room for [BOS] and [EOS], "
+                f"got {max_tokens}"
+            )
+        offsets = self.tokenizer(
+            seq, add_special_tokens=False, return_offsets_mapping=True, verbose=False
+        )["offset_mapping"]
+        cuts = [0] + [offsets[i][0] for i in range(room, len(offsets), room)] + [len(seq)]
+        return [seq[a:b] for a, b in zip(cuts, cuts[1:])]
