@@ -14,8 +14,9 @@ tokenizers
 huggingface_hub[hf_xet]
 accelerate
 
-# Required by the taxonomy scripts (Poincare embedding construction) and by the
-# species lookup table; not needed to run the model itself.
+# Required by the taxonomy scripts (Poincare embedding construction); not needed
+# to run the model or to load the species lookup table. With pandas installed,
+# MicroGlot.taxonomy() returns a DataFrame, otherwise a list of dicts.
 numpy
 pandas
 

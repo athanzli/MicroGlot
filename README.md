@@ -34,7 +34,8 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
 If this prints `False`, install torch for your driver from <https://pytorch.org/get-started/locally/>.
-Without a usable GPU, `microglot.py` runs on the CPU and says so.
+pip's default torch is CPU-only on Windows, and the default Linux build (CUDA 13.0) needs NVIDIA driver
+580 or newer. Without a usable GPU, `microglot.py` runs on the CPU and says so.
 
 `flash-attn` is optional. Install it for the fastest rotary kernel; without it the model falls back to
 an equivalent pure-PyTorch implementation.
@@ -82,6 +83,9 @@ len(states)          # 23, one per decoder layer: states[0] is layer 1, states[-
 emb = model.embed(dna, species="Escherichia coli", layer=11)   # decoder layer 11
 ```
 
+The context is 8,192 tokens (about 43 kb of typical DNA). `microglot.py` truncates longer inputs and
+warns; `model.split(seq)` cuts a long sequence into contiguous pieces that fit.
+
 Full usage documentation, including embedding your own FASTA files, the species assets and the
 standard `transformers` interface, is in the [model card](https://huggingface.co/athanzli/MicroGlot).
 
@@ -89,7 +93,7 @@ standard `transformers` interface, is in the [model card](https://huggingface.co
 
 | Path | Description |
 |---|---|
-| `microglot.py` | User-facing helper: loading, species resolution, embeddings, per-layer states |
+| `microglot.py` | User-facing helper: loading, species resolution, embeddings, per-layer states, long-sequence splitting |
 | `modeling_microglot.py` | Reference implementation of the architecture (MoE, FiLM-modulated routing, species conditioning) |
 | `example.py` | Minimal end-to-end example |
 | `taxonomy/compute_poincare_embeddings.py` | Fits the hyperbolic taxonomy embeddings on the taxonomy tree |
