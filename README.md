@@ -5,15 +5,12 @@ A taxonomy-informed sparse DNA foundation model for microbial genomics.
 MicroGlot is a 23-layer decoder-only mixture-of-experts transformer pretrained on **378.3 billion
 nucleotides** from **3.70 million sequences** across **99,700 microbial species** — bacteria, archaea,
 fungi, protists, viruses and plasmids. It encodes the taxonomic hierarchy as hyperbolic (Poincaré)
-embeddings learned independently of the language-modelling objective, and uses them both as an input
-token and to steer expert routing.
+embeddings and uses them both as an input token and to steer expert routing.
 
 For details, see our manuscript, [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1).
 
-**Model weights, the tokenizer and the species assets live on Hugging Face:**
-[huggingface.co/athanzli/MicroGlot](https://huggingface.co/athanzli/MicroGlot)
-
-This repository holds the source code. It deliberately contains no large binaries.
+This repository holds the source code. The model weights, tokenizer and species assets are on
+Hugging Face: [huggingface.co/athanzli/MicroGlot](https://huggingface.co/athanzli/MicroGlot).
 
 ## Install
 
@@ -21,105 +18,49 @@ This repository holds the source code. It deliberately contains no large binarie
 git clone https://github.com/athanzli/MicroGlot.git
 cd MicroGlot
 pip install -r requirements.txt
-python example.py   # smoke test; the first run downloads ~18 GB of weights from Hugging Face
+python example.py   # smoke test; the first run downloads the models (~18 GB)
 ```
 
-`microglot.py` is a helper module in this repository, not a pip package: run your code from the
-repository directory, or copy `microglot.py` next to your script or notebook.
-
-With an NVIDIA GPU, check that torch can use it:
-
-```bash
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-```
-
-If this prints `False`, install torch for your driver from <https://pytorch.org/get-started/locally/>.
-pip's default torch is CPU-only on Windows, and the default Linux build (CUDA 13.0) needs NVIDIA driver
-580 or newer. Without a usable GPU, `microglot.py` runs on the CPU and says so.
-
-`flash-attn` is optional. Install it for the fastest rotary kernel; without it the model falls back to
-an equivalent pure-PyTorch implementation.
-
-### Requirements
-
-Python 3.10 or newer, torch 2.7 or newer (torch 2.5 and 2.6 give different outputs; torch 2.4 cannot
-run the model) and transformers 4.51.3 (4.50 to 4.57 give identical outputs). A 16 GB GPU holds one
-of the two models at a time. Download sizes, memory use and settings for older GPUs and CPUs are given
-in the [model card](https://huggingface.co/athanzli/MicroGlot).
+Run your code from this folder, or copy `microglot.py` next to your script or notebook.
+A GPU with 16 GB of memory runs either model; without a GPU, MicroGlot runs on the CPU, more slowly.
 
 ## Quickstart
-
-Weights are fetched from Hugging Face on first use.
 
 ```python
 from microglot import MicroGlot
 
 model = MicroGlot.from_pretrained("athanzli/MicroGlot")
-
 dna = "ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCCAATTCTTGTTGAATTAGATGGT"
 
-# species known -> use its precomputed taxonomy embedding
-emb = model.embed(dna, species="Escherichia coli")      # [1, 1024]
+# 1. species known: use its taxonomy embedding
+emb = model.embed(dna, species="Escherichia coli")   # [1, 1024]
 
-# species names are resolved loosely; the following are equivalent
-emb = model.embed(dna, species="escherichia_coli")
-emb = model.embed(dna, species="ESCHERICHIA-COLI")
-
-# species unknown -> the built-in encoder infers one from the sequence
+# 2. species unknown: the built-in encoder infers it from the sequence
 emb = model.embed(dna)
 
-# no species information at all (both models loaded together take ~17 GiB of GPU memory;
-# on a 16 GB GPU, run `del model; import torch; torch.cuda.empty_cache()` first)
+# 3. no species information: use MicroGlot-plain (on a 16 GB GPU, run `del model` first)
 plain = MicroGlot.from_pretrained("athanzli/MicroGlot", variant="plain")
 emb = plain.embed(dna)
+
+# a specific decoder layer (1 to 23; intermediate layers often work better than the last one)
+emb = model.embed(dna, species="Escherichia coli", layer=11)
 ```
 
-Per-layer representations, for probing:
-
-```python
-states, mask = model.hidden_states(dna, species="Escherichia coli")
-len(states)          # 23, one per decoder layer: states[0] is layer 1, states[-1] layer 23
-
-emb = model.embed(dna, species="Escherichia coli", layer=11)   # decoder layer 11
-```
-
-The context is 8,192 tokens (about 43 kb of typical DNA). `microglot.py` truncates longer inputs and
-warns; `model.split(seq)` cuts a long sequence into contiguous pieces that fit.
-
-Full usage documentation, including embedding your own FASTA files, the species assets and the
-standard `transformers` interface, is in the [model card](https://huggingface.co/athanzli/MicroGlot).
+For embedding your own FASTA files, long sequences, the species assets and the standard
+`transformers` interface, see the [model card](https://huggingface.co/athanzli/MicroGlot).
 
 ## Repository contents
 
 | Path | Description |
 |---|---|
-| `microglot.py` | User-facing helper: loading, species resolution, embeddings, per-layer states, long-sequence splitting |
-| `modeling_microglot.py` | Reference implementation of the architecture (MoE, FiLM-modulated routing, species conditioning) |
+| `microglot.py` | Helper for loading the model and computing embeddings |
+| `modeling_microglot.py` | Model architecture |
 | `example.py` | Minimal end-to-end example |
-| `taxonomy/compute_poincare_embeddings.py` | Fits the hyperbolic taxonomy embeddings on the taxonomy tree |
-| `taxonomy/build_species_lookup.py` | Builds the released species lookup table from fitted embeddings |
+| `taxonomy/` | Scripts that fit the Poincaré taxonomy embeddings and build the species lookup table (run with `--help`) |
 | `training/tokenizer.py` | Byte-pair-encoding tokenizer used for pretraining |
-| `benchmarks/baselines.py` | Feature extractors for the baseline models evaluated in the paper |
+| `benchmarks/baselines.py` | Embedding extractors for the baseline models evaluated in the paper |
 
-`microglot.py`, `modeling_microglot.py` and `example.py` are identical to the copies distributed with
-the model on Hugging Face.
-
-### Reproducing the taxonomy embeddings
-
-`taxonomy/compute_poincare_embeddings.py` builds the parent–child relation set from a taxonomy table
-and fits Poincaré embeddings with
-[facebookresearch/poincare-embeddings](https://github.com/facebookresearch/poincare-embeddings),
-which must be cloned separately. `taxonomy/build_species_lookup.py` then converts a fitted checkpoint
-into the unit-norm lookup table the model consumes. Both scripts take all inputs and outputs as
-command-line arguments; run either with `--help`.
-
-### Baselines
-
-`benchmarks/baselines.py` provides the frozen-embedding extractors for the baseline models compared
-against MicroGlot: ProkBERT-mini-long, three Nucleotide Transformer multispecies checkpoints,
-DNABERT-2, DNABERT-S and Evo2. All checkpoints are downloaded from their public sources; none is
-bundled here. Evo2 additionally requires the `evo2` and `vortex` packages, and a CUDA GPU is required
-throughout, since the encoders run under CUDA autocast.
+`microglot.py`, `modeling_microglot.py` and `example.py` are identical to the copies on Hugging Face.
 
 ## Licence
 
