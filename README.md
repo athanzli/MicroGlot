@@ -71,9 +71,10 @@ layer_11 = outputs.hidden_states[11]     # [2, length, 1024], decoder layer 11
 
 ### Sequences without a known species
 
-If a small portion of your sequences have no known species, use the Species-encoder to infer their
-species embeddings from the DNA and fill these gaps. Continuing the MicroGlot example, pass `None` as
-their species:
+If a small portion of your sequences have no known species, you can discard them, so that every
+remaining sequence is given its exact taxonomy embedding. To keep them instead, use the Species-encoder
+to infer their species embeddings from the DNA and fill these gaps. Continuing the MicroGlot example,
+pass `None` as their species:
 
 ```python
 model.load_species_encoder()   # downloads the Species-encoder (6 GB) and attaches it to MicroGlot
@@ -128,9 +129,9 @@ MicroGlot-plain takes no species; everything else works as for MicroGlot.
 ### DNA input
 
 - Case does not matter. N, the IUPAC ambiguity codes and any other character (spaces, line breaks,
-  `-`, `U`) each become one N token, so pass bare DNA (for RNA, replace U with T).
+  `-`, `U`) each become one N token, so pass bare DNA. For RNA, replace U with T; the RNA-virus
+  genomes MicroGlot was trained on are also written with T.
 - A sequence can have up to 8,192 tokens, [BOS] and [EOS] included (about 43 kb).
-- MicroGlot reads the strand you give it; it does not add the reverse complement.
 
 ## Repository contents
 
@@ -148,8 +149,6 @@ Source code in this repository is released under the [MIT License](LICENSE). The
 assets on Hugging Face are released under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ## Citation
-
-If you use MicroGlot, please cite our manuscript, [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v2):
 
 > Li, A. Z., Wang, S., Cheng, S., Du, Y. & Liu, R. A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics. *bioRxiv* (2026). https://doi.org/10.64898/2026.09.22.753215
 
