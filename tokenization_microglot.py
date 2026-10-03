@@ -9,6 +9,7 @@ gives -1, which the model fills in with an attached species encoder.
 import difflib
 import hashlib
 import os
+import re
 import unicodedata
 from typing import List, Optional, Sequence, Union
 
@@ -25,7 +26,8 @@ class MicroGlotTokenizerFast(PreTrainedTokenizerFast):
 
     Token ids are those of tokenizer.json. `species_vocab.txt` lists the 99,700 pretraining species;
     line i is `species_ids` i and row i of the model's species table. Names match exactly first, then loosely
-    (case, `_`, `-` and extra spaces ignored).
+    (case and extra spaces ignored, `_` and `-` read as spaces, NCBI's genus brackets optional); a MetaPhlAn or
+    GTDB name is then matched by its `s__` field ("k__Bacteria|...|s__Escherichia_coli", "s__Escherichia coli").
     """
 
     vocab_files_names = {"tokenizer_file": "tokenizer.json", "species_vocab_file": "species_vocab.txt"}
@@ -77,7 +79,28 @@ class MicroGlotTokenizerFast(PreTrainedTokenizerFast):
     @staticmethod
     def _key(name: str) -> str:
         name = unicodedata.normalize("NFC", str(name))
+        name = name.replace("[", "").replace("]", "")  # NCBI's provisional genus: "[Clostridium] scindens"
         return " ".join(name.replace("_", " ").replace("-", " ").lower().split())
+
+    @staticmethod
+    def _species_field(name: str) -> Optional[str]:
+        """The `s__` field of a MetaPhlAn/GTDB-style name, without the prefix ("k__Bacteria|...|s__Escherichia_coli",
+        "d__Bacteria;...;s__Escherichia coli", "s__Escherichia coli"); None unless the name has exactly one."""
+        species = [f.strip()[3:] for f in re.split(r"[|;]", str(name)) if f.strip().startswith("s__")]
+        return species[0] if len(species) == 1 else None
+
+    def _lookup(self, name) -> Optional[int]:
+        """Row of `name`: an exact match, else a loose match (`_key`), else the same for its `s__` field
+        (`_species_field`); None if none matches."""
+        for n in (name, self._species_field(name)):
+            if n is None:
+                continue
+            idx = self.species_to_id.get(n)
+            if idx is None:
+                idx = self._loose_index().get(self._key(n))
+            if idx is not None:
+                return idx
+        return None
 
     def _loose_index(self):
         if self._loose is None:
@@ -87,12 +110,18 @@ class MicroGlotTokenizerFast(PreTrainedTokenizerFast):
         return self._loose
 
     def has_species(self, name: str) -> bool:
-        """True if `name` matches a species in the table (exactly or loosely)."""
-        return name in self.species_to_id or self._key(name) in self._loose_index()
+        """True if `name` matches a species in the table (see the class docstring)."""
+        return self._lookup(name) is not None
 
     def _suggest(self, name: str, n: int = 5) -> List[str]:
-        lk, words = self._loose_index(), self._key(name).split(" ")
-        out = [" ".join(words[:k]) for k in range(len(words) - 1, 1, -1) if " ".join(words[:k]) in lk]
+        lk = self._loose_index()
+        key = re.sub(r"^([a-z])\.(?=[a-z])", r"\1. ", self._key(self._species_field(name) or name))  # "E.coli" -> "e. coli"
+        words = key.split(" ")
+        # Candidatus taxa: also try the name with the prefix added or removed
+        alt = key[len("candidatus "):] if key.startswith("candidatus ") else "candidatus " + key
+        out = [alt] if alt in lk else []
+        for w in (words, alt.split(" ")):
+            out += [" ".join(w[:k]) for k in range(len(w) - 1, 1, -1) if " ".join(w[:k]) in lk]
         if len(words) > 1 and len(words[0].rstrip(".")) == 1:  # "E. coli"
             out += [k for k in lk if k[0] == words[0][0] and k.split(" ")[1:2] == words[1:2]]
         pool = [k for k in lk if k.split(" ", 1)[0] == words[0]] or list(lk)
@@ -116,9 +145,7 @@ class MicroGlotTokenizerFast(PreTrainedTokenizerFast):
             return UNKNOWN_SPECIES_ID
         if not self.id_to_species:
             raise ValueError("This tokenizer has no species vocabulary (MicroGlot-plain takes no species).")
-        idx = self.species_to_id.get(name)
-        if idx is None:
-            idx = self._loose_index().get(self._key(name))
+        idx = self._lookup(name)
         if idx is not None:
             return idx
         if unknown_species == "infer":
@@ -152,25 +179,32 @@ class MicroGlotTokenizerFast(PreTrainedTokenizerFast):
         encoding = super().__call__(text, *args, **kwargs)
         if species is None:
             return encoding
-        n = len(encoding["input_ids"]) if isinstance(text, (list, tuple)) else None
+        opts = {**kwargs, **(kwargs.get("tokenizer_kwargs") or {})}  # as transformers 5 merges tokenizer_kwargs
+        # one sequence or a batch, decided as transformers does: with is_split_into_words, a list of strings is
+        # ONE pre-split sequence and a batch is a list of such lists
+        if opts.get("is_split_into_words"):
+            batched = isinstance(text, (list, tuple)) and len(text) > 0 and isinstance(text[0], (list, tuple))
+        else:
+            batched = isinstance(text, (list, tuple))
+        n = len(encoding["input_ids"]) if batched else None
         if n is None:  # a single sequence
             if not isinstance(species, str):
                 raise ValueError("Pass one species name for one sequence.")
             ids = self.convert_species_to_ids(species, unknown_species)
-            if kwargs.get("return_overflowing_tokens"):
+            if opts.get("return_overflowing_tokens"):
                 ids = [ids] * len(encoding["input_ids"])
-            elif kwargs.get("return_tensors") is not None:
+            elif opts.get("return_tensors") is not None:
                 ids = [ids]  # input_ids is [1, length]: keep species_ids [1]
         else:
             names = [species] * n if isinstance(species, str) else list(species)
-            if kwargs.get("return_overflowing_tokens"):  # windows of long sequences
+            if opts.get("return_overflowing_tokens"):  # windows of long sequences
                 mapping = encoding["overflow_to_sample_mapping"]
                 names = [names[int(i)] for i in mapping] if len(names) != len(mapping) else names
             if len(names) != len(encoding["input_ids"]):
                 raise ValueError(f"Got {len(names)} species for {len(encoding['input_ids'])} sequences.")
             ids = self.convert_species_to_ids(names, unknown_species)
         encoding["species_ids"] = ids
-        return_tensors = kwargs.get("return_tensors")
+        return_tensors = opts.get("return_tensors")
         if return_tensors is not None:
             encoding.convert_to_tensors(tensor_type=return_tensors)
         return encoding

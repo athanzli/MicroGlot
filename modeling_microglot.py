@@ -1005,7 +1005,8 @@ class MicroGlotPreTrainedModel(PreTrainedModel):
             )
         if _DTYPE_KWARG == "torch_dtype" and "dtype" in kwargs:  # accept the newer `dtype=` before transformers 4.56
             kwargs.setdefault("torch_dtype", kwargs.pop("dtype"))
-        model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+        loaded = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+        model = loaded[0] if isinstance(loaded, tuple) else loaded  # output_loading_info=True: (model, info)
         # where this model came from: load_species_encoder() looks for the encoder there, at the same revision
         if pretrained_model_name_or_path is not None:  # None: built from config= and state_dict=
             source = _os.fspath(pretrained_model_name_or_path)
@@ -1019,7 +1020,7 @@ class MicroGlotPreTrainedModel(PreTrainedModel):
             hub = {k: kwargs[k] for k in ("cache_dir", "force_download", "local_files_only", "token", "proxies")
                    if k in kwargs}
             model.load_species_encoder(None if species_encoder is True else species_encoder, **hub)
-        return model
+        return loaded
 
     def to_bfloat16(self) -> "MicroGlotPreTrainedModel":
         """Convert model weights to bfloat16 (the species table stays float32)."""

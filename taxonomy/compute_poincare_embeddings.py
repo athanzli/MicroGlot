@@ -10,7 +10,6 @@ import time
 from itertools import combinations
 
 import numpy as np
-import pandas as pd
 import torch as th
 
 TAX_COLS = [
@@ -21,6 +20,8 @@ TAX_COLS = [
 
 def build_relations_csv(taxonomy_csv, csv_out):
     """Build transitive closure CSV (id1, id2, weight) for embed.py."""
+    import pandas as pd  # imported here so that --help works without pandas
+
     print(f"Loading taxonomy tree from {taxonomy_csv} ...")
     df = pd.read_csv(taxonomy_csv, keep_default_na=False)
     print(f"  Species: {len(df):,}")
