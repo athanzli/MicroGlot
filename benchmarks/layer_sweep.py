@@ -7,10 +7,9 @@
 The CSV has one row per sequence with `sequence` and `label`, and optionally `assembly` (rows sharing it are the
 contigs of one assembly; their embeddings are averaged), `species` (MicroGlot; an empty cell is inferred by the
 Species-encoder) and `split` (train/dev/test: one probe per seed trained on train and stopped early on dev; without it,
-10-fold cross-validation with an 8:1:1 train/validation/test split). Seeds 0, 1 and 2. The paper used
---probe-batch 2048 on the marine, plant & synthetic species task (64 for Evo2-7B-base) and 64 elsewhere. Writes every
-fold's scores to --out and prints the mean test score per layer, the mean over layers 1 to L, and the test score of the
-layer selected on validation.
+10-fold cross-validation with an 8:1:1 train/validation/test split). Seeds 0, 1 and 2. Writes every fold's scores to
+--out and prints the mean test score per layer, the mean over layers 1 to L, and the test score of the layer selected
+on validation.
 """
 import argparse
 import os
@@ -109,9 +108,9 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-def train_probe(x, y, xv, yv, n_out, classification, seed, batch=64):
-    """AdamW (weight decay 0.01; lr 1e-4 at batch 64, scaled by sqrt(batch / 64)), gradient clipping 1.0, at most 100
-    epochs, early stopping after 5 epochs without a lower validation loss; returns the best epoch's weights."""
+def train_probe(x, y, xv, yv, n_out, classification, seed):
+    """Batch 64, AdamW (lr 1e-4, weight decay 0.01), gradient clipping 1.0, at most 100 epochs, early stopping after 5
+    epochs without a lower validation loss; returns the best epoch's weights."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     model = MLP(x.shape[1], n_out).cuda()
@@ -121,8 +120,8 @@ def train_probe(x, y, xv, yv, n_out, classification, seed, batch=64):
     if not classification:
         yt, yv = yt[:, None], yv[:, None]
     loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(torch.tensor(x), yt), shuffle=True,
-                                         batch_size=batch)
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4 * (batch / 64) ** 0.5, weight_decay=0.01)
+                                         batch_size=64)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
     xv = torch.tensor(xv).cuda()
     best, best_state, wait = float("inf"), None, 0
     for _ in range(100):
@@ -160,10 +159,10 @@ def scores(y, p, classification):
     return {"spearman": spearmanr(y, p).statistic, "r2": r2_score(y, p), "rmse": float(np.sqrt(np.mean((y - p) ** 2)))}
 
 
-def fit_and_score(x, y, tr, va, tests, classification, seed, batch, n_out):
+def fit_and_score(x, y, tr, va, tests, classification, seed, n_out):
     sc = StandardScaler().fit(x[tr])
     model, val_loss = train_probe(sc.transform(x[tr]).astype(np.float32), y[tr], sc.transform(x[va]).astype(np.float32),
-                                  y[va], n_out, classification, seed, batch)
+                                  y[va], n_out, classification, seed)
     row = {"val_loss": val_loss}
     for split, idx in (("val", va), *tests):
         pred = predict(model, sc.transform(x[idx]).astype(np.float32), classification)
@@ -171,7 +170,7 @@ def fit_and_score(x, y, tr, va, tests, classification, seed, batch, n_out):
     return row
 
 
-def probe(x, y, classification, split=None, batch=64, seeds=(0, 1, 2), n_folds=10):
+def probe(x, y, classification, split=None, seeds=(0, 1, 2), n_folds=10):
     rows = []
     if split is not None:  # the given train/dev/test split
         idx = {s: np.flatnonzero(split == s) for s in ("train", "dev", "test")}
@@ -179,7 +178,7 @@ def probe(x, y, classification, split=None, batch=64, seeds=(0, 1, 2), n_folds=1
         for seed in seeds:
             rows.append({"seed": seed, "fold": 1, **fit_and_score(x, y, idx["train"], idx["dev"],
                                                                   [("test", idx["test"])], classification, seed,
-                                                                  batch, n_out)})
+                                                                  n_out)})
         return rows
     for seed in seeds:
         folds = (StratifiedKFold(n_folds, shuffle=True, random_state=seed).split(x, y) if classification
@@ -188,7 +187,7 @@ def probe(x, y, classification, split=None, batch=64, seeds=(0, 1, 2), n_folds=1
             strat = y[train] if classification and np.unique(y[train], return_counts=True)[1].min() >= 2 else None
             tr, va = train_test_split(train, test_size=1 / 9, stratify=strat, random_state=seed)
             rows.append({"seed": seed, "fold": k + 1, **fit_and_score(x, y, tr, va, [("test", test)], classification,
-                                                                     seed + k, batch,
+                                                                     seed + k,
                                                                      int(y.max()) + 1 if classification else 1)})
     return rows
 
@@ -199,7 +198,6 @@ def main():
                     help="MicroGlot, MicroGlot-plain or one of " + ", ".join(baselines.MODEL_CONFIGS))
     ap.add_argument("--data", required=True)
     ap.add_argument("--task-type", required=True, choices=["classification", "regression"])
-    ap.add_argument("--probe-batch", type=int, default=64)
     ap.add_argument("--out", default=None, help="CSV of every fold's scores (default: <data>__<model>.csv)")
     args = ap.parse_args()
     out = args.out or f"{os.path.splitext(args.data)[0]}__{args.model}.csv"
@@ -229,8 +227,7 @@ def main():
     rows = []
     for layer in range(feats.shape[1]):
         rows += [{"layer": layer, **r} for r in probe(feats[:, layer].numpy(), y, classification,
-                                                      df["split"].to_numpy() if "split" in df else None,
-                                                      args.probe_batch)]
+                                                      df["split"].to_numpy() if "split" in df else None)]
         print(f"layer {layer}: test {metric} {np.mean([r[f'test_{metric}'] for r in rows if r['layer'] == layer]):.4f}",
               flush=True)
     res = pd.DataFrame(rows)
