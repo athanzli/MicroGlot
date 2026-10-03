@@ -127,12 +127,6 @@ last_layer = outputs.last_hidden_state   # [2, length, 1024]
 
 MicroGlot-plain takes no species; everything else works as for MicroGlot.
 
-### DNA input
-
-- Case does not matter. N, the IUPAC ambiguity codes and any other character (spaces, line breaks, `-`)
-  each become one N token, so pass bare DNA.
-- A sequence can have up to 8,192 tokens, [BOS] and [EOS] included (about 43 kb).
-
 ## Repository contents
 
 | Path | Description |
