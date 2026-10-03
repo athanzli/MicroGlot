@@ -1,9 +1,26 @@
-"""Genomic language model: decoder-only transformer architecture."""
+"""MicroGlot: a taxonomy-informed sparse (mixture-of-experts) decoder-only DNA language model.
+
+One code file serves the three models of the repository ``athanzli/MicroGlot``:
+
+* the repository root  - MicroGlot, the species-conditioned language model (``MicroGlotForCausalLM``)
+* ``plain/``            - MicroGlot-plain, the same architecture without species conditioning
+* ``species_encoder/``  - the Species-encoder, which predicts a species embedding from DNA (``MicroGlotSpeciesEncoder``)
+
+Species inputs follow the ``input_ids`` / ``inputs_embeds`` convention:
+
+* ``species_ids``    (LongTensor ``[batch]``): rows of the model's table of the 99,700 pretraining species
+                     (produced by the tokenizer's ``species=`` argument); ``-1`` marks a sequence whose
+                     species is unknown and must be inferred by an attached species encoder.
+* ``species_embeds`` (FloatTensor ``[batch, 32]`` or ``[32]``): your own 32-d species vectors.
+
+MicroGlot runs on NVIDIA GPUs with flash-attn installed, as it was trained and benchmarked. The numerical
+code (attention, mixture of experts, decoder layers) is the code MicroGlot was trained with, unchanged.
+"""
 
 import math
 import warnings
-from typing import Dict, Optional, Tuple, Union, List
 from dataclasses import dataclass
+from typing import List, Optional, Tuple, Union
 
 import os as _os
 _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -11,84 +28,82 @@ _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import transformers
+from packaging import version
 from torch.utils.checkpoint import checkpoint
+
+# Supported versions (see the model card): PyTorch >= 2.7, transformers >= 4.51.3, flash-attn 2.7.4-2.8.3 tested.
+# PyTorch 2.5 and 2.6 compute nn.RMSNorm(eps=None) of bf16 inputs with the bf16 epsilon, which changes the outputs.
+_INSTALL = "https://huggingface.co/athanzli/MicroGlot#installation"
+if version.parse(torch.__version__).release < (2, 7):
+    raise ImportError(f"MicroGlot requires PyTorch 2.7 or later (found {torch.__version__}). See {_INSTALL}.")
+if version.parse(transformers.__version__).release < (4, 51, 3):
+    raise ImportError(f"MicroGlot requires transformers 4.51.3 or later (found {transformers.__version__}). "
+                      f"See {_INSTALL}.")
+# MicroGlot was trained and benchmarked with flash-attn's rotary position-embedding kernel, so it
+# is required: every installation then computes the same embeddings.
 try:
     from flash_attn.layers.rotary import RotaryEmbedding
+except ImportError as _flash_attn_error:
+    raise ImportError(
+        "MicroGlot requires FlashAttention-2 (the flash-attn package, whose rotary position-embedding kernel was "
+        f"used to train and benchmark the model) and an NVIDIA GPU. Install it as described at {_INSTALL}. "
+        f"(Importing flash_attn failed with: {_flash_attn_error})"
+    ) from _flash_attn_error
 
-    _MICROGLOT_FLASH_ROPE = True
-except ImportError:  # pragma: no cover
-    _MICROGLOT_FLASH_ROPE = False
+from transformers import PretrainedConfig, PreTrainedModel
+from transformers.modeling_outputs import CausalLMOutputWithPast, ModelOutput
+from transformers.utils import logging
 
-    class RotaryEmbedding(nn.Module):
-        """Pure-PyTorch drop-in for flash_attn.layers.rotary.RotaryEmbedding."""
+logger = logging.get_logger(__name__)
 
-        def __init__(self, dim, base=10000.0, interleaved=False, scale_base=None, device=None):
-            super().__init__()
-            if interleaved or scale_base is not None:
-                raise NotImplementedError(
-                    "MicroGlot's RoPE fallback supports interleaved=False and scale_base=None only"
-                )
-            self.dim, self.base, self.interleaved, self.scale = dim, float(base), False, None
-            inv_freq = 1.0 / (
-                self.base ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim)
-            )
-            self.register_buffer("inv_freq", inv_freq, persistent=False)
-            self._seq_len_cached = 0
-            self._cos_cached = None
-            self._sin_cached = None
-
-        def _update(self, seqlen, device):
-            if (
-                self._cos_cached is not None
-                and seqlen <= self._seq_len_cached
-                and self._cos_cached.device == device
-            ):
-                return
-            self._seq_len_cached = seqlen
-            t = torch.arange(seqlen, device=device, dtype=torch.float32)
-            # Recompute inv_freq instead of reading the non-persistent buffer, which transformers>=5
-            # leaves uninitialised; rounding to the buffer's dtype keeps outputs identical to 4.51.3.
-            inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim))
-            freqs = torch.outer(t, inv_freq.to(self.inv_freq.dtype).to(device=device, dtype=torch.float32))
-            self._cos_cached = torch.cos(freqs)
-            self._sin_cached = torch.sin(freqs)
-
-        @staticmethod
-        def _rotate(x, cos, sin):
-            half = x.shape[-1] // 2
-            xf = x.float()
-            x1, x2 = xf[..., :half], xf[..., half:]
-            c = cos[None, :, None, :].float()
-            s = sin[None, :, None, :].float()
-            return torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1).to(x.dtype)
-
-        def forward(self, qkv, kv=None, seqlen_offset=0, max_seqlen=None, num_heads_q=None):
-            if kv is not None or num_heads_q is None:
-                raise NotImplementedError(
-                    "MicroGlot's RoPE fallback only supports the packed-qkv call with num_heads_q"
-                )
-            seqlen = qkv.shape[1]
-            offset = seqlen_offset if isinstance(seqlen_offset, int) else 0
-            self._update(max_seqlen or (seqlen + offset), qkv.device)
-            cos = self._cos_cached[offset : offset + seqlen]
-            sin = self._sin_cached[offset : offset + seqlen]
-            n_q = num_heads_q
-            n_kv = (qkv.shape[2] - n_q) // 2
-            q, k, v = qkv[:, :, :n_q], qkv[:, :, n_q : n_q + n_kv], qkv[:, :, n_q + n_kv :]
-            return torch.cat([self._rotate(q, cos, sin), self._rotate(k, cos, sin), v], dim=2)
-
-from transformers import PretrainedConfig, PreTrainedModel, GenerationMixin
-from transformers.modeling_outputs import (
-    BaseModelOutput,
-    CausalLMOutputWithPast,
-    ModelOutput,
-)
+# from_pretrained(torch_dtype=...) is called dtype= from transformers 4.56 on
+_DTYPE_KWARG = "dtype" if version.parse(transformers.__version__).release >= (4, 56) else "torch_dtype"
 
 
 @dataclass
-class GenomicModelOutput(ModelOutput):
-    """Output type for GenomicModel with optional MoE auxiliary loss."""
+class MicroGlotModelOutput(ModelOutput):
+    """Backbone output. The species position is removed, so every tensor lines up with ``input_ids``.
+
+    last_hidden_state: ``[batch, length, hidden]``, the final-norm output.
+    hidden_states: with ``output_hidden_states=True``, ``num_hidden_layers + 1`` tensors (24): ``[0]`` the
+        token embeddings, ``[k]`` the output of decoder layer k (1..22), ``[-1]`` the final-norm output
+        (equal to ``last_hidden_state``).
+    moe_loss: the router load-balancing loss summed over layers (already scaled by
+        ``router_aux_loss_coef``), or None with ``output_router_logits=False``.
+    species_embeds: ``[batch, 32]`` unit-norm species vectors actually used, in the model dtype
+        (None for MicroGlot-plain).
+    """
+
     last_hidden_state: torch.FloatTensor = None
+    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    moe_loss: Optional[torch.FloatTensor] = None
+    species_embeds: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class MicroGlotCausalLMOutput(CausalLMOutputWithPast):
+    """``CausalLMOutputWithPast`` plus the species vectors used (``species_embeds``, appended after the
+    standard fields). ``past_key_values`` and ``attentions`` are always None (MicroGlot has no KV cache)."""
+
+    species_embeds: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class MicroGlotSpeciesEncoderOutput(ModelOutput):
+    """Species-encoder output, in the style of ``CLIPTextModelOutput``.
+
+    species_embeds: ``[batch, 32]`` unit-norm predicted species vectors, normalised in the model dtype: the
+        vectors MicroGlot is conditioned on (listed first, so pipelines return it).
+    embeddings: ``[batch, 32]`` the projection output before normalisation.
+    pooler_output: ``[batch, hidden]`` the pooled state (last real token).
+    last_hidden_state, hidden_states, moe_loss: as in ``MicroGlotModelOutput``.
+    """
+
+    species_embeds: torch.FloatTensor = None
+    embeddings: Optional[torch.FloatTensor] = None
+    pooler_output: Optional[torch.FloatTensor] = None
+    last_hidden_state: Optional[torch.FloatTensor] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     moe_loss: Optional[torch.FloatTensor] = None
 
@@ -306,29 +321,43 @@ def print_model_parameter_summary(config: "GenomicModelConfig") -> None:
     print("=" * 60)
 
 
-class GenomicModelConfig(PretrainedConfig):
-    """Configuration for the Genomic Language Model (Decoder-Only, Causal LM)."""
-    
-    model_type = "genomic_lm"
 
-    auto_map = {
-        "AutoConfig": "model.GenomicModelConfig",
-        "AutoModel": "model.GenomicModel",
-        "AutoModelForCausalLM": "model.GenomicLMForCausalLM",
-    }
+class MicroGlotConfig(PretrainedConfig):
+    """Configuration shared by MicroGlot, MicroGlot-plain and the Species-encoder.
 
-    keys_to_ignore_at_inference = []
-    
+    The architecture fields (vocab_size, hidden_size, num_hidden_layers, num_query_heads, num_kv_heads,
+    intermediate_size, rope_theta, moe_layer_experts, num_experts_per_tok, moe_use_residual,
+    gate_softmax_over_all_experts, router_aux_loss_coef, moe_dispatch, ...) are those of the pretrained models.
+    `moe_dispatch`: "sorted" (default), "loop" or "grouped".
+
+    Species-related fields:
+        species_emb_dim (`int`, *optional*): size of the species vector (32). `None` -> no species input
+            (MicroGlot-plain, and the backbone of the species encoder).
+        prepend_species_token (`bool`): insert the projected species vector as a token after `[BOS]`.
+        num_species (`int`): rows in the built-in species table addressed by `species_ids` (99,700; 0 = none).
+        species_vocab_sha256 (`str`, *optional*): sha256 of the species names in table order, joined by
+            newlines; the tokenizer's `species_vocab_sha256` must match it.
+        species_encoder_repo / species_encoder_revision / species_encoder_subfolder (`str`, *optional*): where
+            `load_species_encoder()` and `from_pretrained(..., species_encoder=True)` find the Species-encoder.
+            `species_encoder_repo=None`: the repository or folder this model was loaded from, at the same
+            revision; `species_encoder_subfolder` is the encoder's folder there (`"species_encoder"`).
+        species_encoder_embedding_dim (`int`): output size of `MicroGlotSpeciesEncoder` (32).
+        species_encoder_pooling_strategy (`str`): `"eos"` (last real token) or `"mean"`.
+    """
+
+    model_type = "microglot"
+    keys_to_ignore_at_inference = ["moe_loss", "species_embeds"]
+
     def __init__(
         self,
-        vocab_size: int = 4096,
+        vocab_size: int = 8192,
         hidden_size: int = 1024,
-        num_hidden_layers: int = 12,
+        num_hidden_layers: int = 23,
         num_query_heads: int = 16,
-        num_kv_heads: int = 2,
+        num_kv_heads: int = 8,
         intermediate_size: Optional[int] = None,
         attention_dropout_prob: float = 0.0,
-        classifier_dropout_prob: float = 0.1,
+        classifier_dropout_prob: float = 0.0,
         attn_output_dropout_prob: float = 0.0,
         moe_output_dropout_prob: float = 0.0,
         ffn_dropout_prob: float = 0.0,
@@ -337,13 +366,13 @@ class GenomicModelConfig(PretrainedConfig):
         max_trained_length: int = 8192,
         init_scale: float = 0.1,
         use_swiglu: bool = True,
-        gradient_checkpointing: bool = True,
+        gradient_checkpointing: bool = False,
         use_flash_attention: bool = True,
         pad_token_id: int = 0,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         num_experts_per_tok: int = 1,
-        router_aux_loss_coef: float = 0.01,
+        router_aux_loss_coef: float = 0.001,
         moe_layer_experts: Optional[List[int]] = None,
         moe_use_residual: bool = True,
         moe_capacity_factor: float = 1.25,
@@ -352,28 +381,34 @@ class GenomicModelConfig(PretrainedConfig):
         moe_noisy_gate_policy: Optional[str] = None,
         moe_drop_tokens: bool = True,
         moe_use_rts: bool = True,
-        gate_softmax_over_all_experts: bool = False,
-        moe_dispatch: str = "loop",
+        gate_softmax_over_all_experts: bool = True,
+        moe_dispatch: str = "sorted",
         species_emb_dim: Optional[int] = None,
-        use_species_encoder: bool = False,
         prepend_species_token: bool = False,
+        num_species: int = 0,
         species_encoder_embedding_dim: int = 32,
         species_encoder_pooling_strategy: str = "eos",
+        species_encoder_repo: Optional[str] = None,
+        species_encoder_revision: Optional[str] = None,
+        species_encoder_subfolder: Optional[str] = None,
+        species_vocab_sha256: Optional[str] = None,
+        use_species_encoder: bool = False,
         **kwargs,
     ):
-        super().__init__(
-            pad_token_id=pad_token_id,
-            eos_token_id=eos_token_id,
-            bos_token_id=bos_token_id,
-            **kwargs
-        )
-        
+        if use_species_encoder:  # a training-code config: the species encoder is bundled inside the checkpoint
+            logger.warning_once(
+                "This checkpoint bundles a copy of the species encoder, which this code ignores. Species names "
+                "and vectors work unchanged. To infer species, attach the Species-encoder with "
+                "model.load_species_encoder()."
+            )
+            if species_encoder_repo is None:
+                species_encoder_repo, species_encoder_subfolder = "athanzli/MicroGlot", "species_encoder"
+        super().__init__(pad_token_id=pad_token_id, eos_token_id=eos_token_id, bos_token_id=bos_token_id, **kwargs)
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_query_heads = num_query_heads
         self.num_kv_heads = num_kv_heads
-
         if intermediate_size is None:
             if use_swiglu:
                 hidden_dim = (8 * hidden_size) // 3
@@ -381,7 +416,6 @@ class GenomicModelConfig(PretrainedConfig):
             else:
                 intermediate_size = 4 * hidden_size
         self.intermediate_size = intermediate_size
-
         self.attention_dropout_prob = attention_dropout_prob
         self.classifier_dropout_prob = classifier_dropout_prob
         self.attn_output_dropout_prob = attn_output_dropout_prob
@@ -394,7 +428,6 @@ class GenomicModelConfig(PretrainedConfig):
         self.use_swiglu = use_swiglu
         self.gradient_checkpointing = gradient_checkpointing
         self.use_flash_attention = use_flash_attention
-        
         self.num_experts_per_tok = num_experts_per_tok
         self.router_aux_loss_coef = router_aux_loss_coef
         self.moe_layer_experts = moe_layer_experts
@@ -409,83 +442,86 @@ class GenomicModelConfig(PretrainedConfig):
         self.gate_softmax_over_all_experts = gate_softmax_over_all_experts
         self.moe_dispatch = moe_dispatch
         self.species_emb_dim = species_emb_dim
-        self.use_species_encoder = use_species_encoder
+        self.use_species_encoder = False  # a training-code flag; the encoder is attached separately
         self.prepend_species_token = prepend_species_token
+        self.num_species = num_species
         self.species_encoder_embedding_dim = species_encoder_embedding_dim
         self.species_encoder_pooling_strategy = species_encoder_pooling_strategy
-
-        if self.prepend_species_token and self.species_emb_dim is None:
-            raise ValueError(
-                "species_emb_dim must be specified when prepend_species_token=True. "
-                "Set species_emb_dim to the dimension of your species embeddings."
-            )
-        
-        if self.use_species_encoder and self.species_emb_dim is None:
-            raise ValueError(
-                "species_emb_dim must be specified when use_species_encoder=True. "
-                "Set species_emb_dim to the desired species embedding dimension."
-            )
-        if self.use_species_encoder and self.species_emb_dim != self.species_encoder_embedding_dim:
-            raise ValueError(
-                f"When use_species_encoder=True, species_emb_dim ({self.species_emb_dim}) must "
-                f"equal species_encoder_embedding_dim ({self.species_encoder_embedding_dim})."
-            )
-        
+        self.species_encoder_repo = species_encoder_repo
+        self.species_encoder_revision = species_encoder_revision
+        self.species_encoder_subfolder = species_encoder_subfolder
+        self.species_vocab_sha256 = species_vocab_sha256
+        if prepend_species_token and species_emb_dim is None:
+            raise ValueError("species_emb_dim must be set when prepend_species_token=True.")
+        if num_species and species_emb_dim is None:
+            raise ValueError("num_species > 0 needs species_emb_dim (the width of the species table).")
         assert hidden_size % num_query_heads == 0
         self.head_dim = hidden_size // num_query_heads
-        
         assert num_query_heads % num_kv_heads == 0, "num_query_heads must be divisible by num_kv_heads"
         self.num_kv_groups = num_query_heads // num_kv_heads
-        
         self._validate_moe_config()
-    
+
     def _validate_moe_config(self):
-        """Validate MoE configuration for consistency and correctness."""
         if not self.use_moe:
             return
-
         if len(self.moe_layer_experts) != self.num_hidden_layers:
-            raise ValueError(
-                f"moe_layer_experts length ({len(self.moe_layer_experts)}) must equal "
-                f"num_hidden_layers ({self.num_hidden_layers}). "
-                f"Each layer needs an expert count specification (0 for dense, >0 for MoE)."
-            )
+            raise ValueError("moe_layer_experts must have one entry per layer (0 = dense).")
+        for i, n in enumerate(self.moe_layer_experts):
+            if not isinstance(n, int) or n < 0:
+                raise ValueError(f"moe_layer_experts[{i}] = {n} is invalid.")
+            if 0 < n < self.num_experts_per_tok:
+                raise ValueError(f"moe_layer_experts[{i}] = {n} < num_experts_per_tok.")
 
-        for i, num_exp in enumerate(self.moe_layer_experts):
-            if not isinstance(num_exp, int) or num_exp < 0:
-                raise ValueError(
-                    f"moe_layer_experts[{i}] = {num_exp} is invalid. "
-                    f"Must be a non-negative integer (0 for dense, >0 for MoE)."
-                )
-
-        for i, num_exp in enumerate(self.moe_layer_experts):
-            if num_exp > 0 and num_exp < self.num_experts_per_tok:
-                raise ValueError(
-                    f"moe_layer_experts[{i}] = {num_exp} is less than num_experts_per_tok "
-                    f"({self.num_experts_per_tok}). Each MoE layer needs at least "
-                    f"{self.num_experts_per_tok} experts for top-k routing."
-                )
-    
     def get_num_experts_for_layer(self, layer_idx: int) -> int:
-        """Get the number of experts for a specific layer."""
+        """Number of experts in layer `layer_idx` (0 = dense feed-forward)."""
         if not self.use_moe:
             return 0
-
-        if layer_idx < 0 or layer_idx >= len(self.moe_layer_experts):
-            raise IndexError(
-                f"layer_idx {layer_idx} is out of range for moe_layer_experts "
-                f"(length {len(self.moe_layer_experts)})"
-            )
-        
         return self.moe_layer_experts[layer_idx]
-    
+
     def get_parameter_counts(self) -> "MoEParameterCounts":
-        """Get parameter counts for this configuration."""
+        """Total and activated parameter counts for this configuration."""
         return compute_moe_parameter_counts(self)
-    
+
     def print_parameter_summary(self) -> None:
         """Print a detailed parameter summary for this configuration."""
         print_model_parameter_summary(self)
+
+    def to_dict(self):
+        # save_pretrained() copies this code file next to config.json (see register_for_auto_class below), so
+        # keep every auto_map entry local: a saved model then runs the code it was saved with, not the Hub's
+        # latest (transformers rewrites Hub-loaded entries to "athanzli/MicroGlot--modeling_microglot...").
+        out = super().to_dict()
+        if isinstance(out.get("auto_map"), dict):
+            out["auto_map"] = {k: v.split("--")[-1] if isinstance(v, str) else v for k, v in out["auto_map"].items()}
+        return out
+
+    @classmethod
+    def get_config_dict(cls, *args, **kwargs):
+        config_dict, kwargs = super().get_config_dict(*args, **kwargs)
+        if config_dict.get("model_type") == "genomic_lm":  # the training code's name of this model type
+            config_dict["model_type"] = cls.model_type
+        return config_dict, kwargs
+
+
+GenomicModelConfig = MicroGlotConfig  # the training code's name, used in the layer code's type hints
+
+
+class MicroGlotSpeciesEncoderConfig(MicroGlotConfig):
+    """Configuration of the Species-encoder: `MicroGlotConfig` under its own model type, so that the three
+    models of the repository, which share this code file, keep distinct Auto classes."""
+
+    model_type = "microglot_species_encoder"
+
+    def __init__(self, **kwargs):  # explicit: transformers 5 would otherwise turn the subclass into a dataclass
+        super().__init__(**kwargs)
+
+    @classmethod
+    def get_config_dict(cls, *args, **kwargs):
+        config_dict, kwargs = super().get_config_dict(*args, **kwargs)
+        if config_dict.get("model_type") in ("microglot", "genomic_lm"):  # encoder folders of the training code
+            config_dict["model_type"] = cls.model_type
+        return config_dict, kwargs
+
 
 class GenomicAttention(nn.Module):
     """Grouped Query Attention (GQA) with RoPE and Flash Attention 2.0."""
@@ -885,16 +921,60 @@ class GenomicDecoderLayer(nn.Module):
         
         return hidden_states, moe_loss
 
-class GenomicPreTrainedModel(PreTrainedModel):
-    """Base class for Genomic models, providing weight initialization and common utilities."""
-    
-    config_class = GenomicModelConfig
+
+class MicroGlotSpeciesTable(nn.Module):
+    """The pretraining species' 32-d Poincare vectors, addressed by `species_ids` (cf. VITS's speaker table).
+
+    `weight` is a float32 buffer `[num_species, 32]` that follows device moves but never dtype casts
+    (`torch_dtype=...`, `.to(torch.bfloat16)`, `.half()`): the prior is normalised in float32 and then cast.
+    Row i belongs to line i of the tokenizer's species_vocab.txt.
+    """
+
+    def __init__(self, num_species: int, dim: int):
+        super().__init__()
+        self.register_buffer("weight", torch.zeros(num_species, dim, dtype=torch.float32))
+
+    def _apply(self, fn, recurse=True):
+        moved = fn(self.weight)
+        self._buffers["weight"] = moved if moved.dtype == torch.float32 else self.weight.to(moved.device)
+        return self
+
+    def forward(self, species_ids: torch.LongTensor) -> torch.Tensor:
+        return self.weight[species_ids]
+
+
+class MicroGlotHead(nn.Module):
+    """dense -> GELU -> out_proj: the Species-encoder's projection."""
+
+    def __init__(self, in_dim: int, hidden: int, out_dim: int):
+        super().__init__()
+        self.dense = nn.Linear(in_dim, hidden)
+        self.act = nn.GELU()
+        self.out_proj = nn.Linear(hidden, out_dim)
+
+    def forward(self, x):
+        return self.out_proj(self.act(self.dense(x)))
+
+
+def _rope_modules(module: nn.Module):
+    """The flash-attn rotary-embedding modules inside `module`."""
+    return [m for m in module.modules() if isinstance(m, RotaryEmbedding)]
+
+
+class MicroGlotPreTrainedModel(PreTrainedModel):
+    """Base class of the MicroGlot models: weight initialisation, loading, and the species-encoder calls
+    (delegated to the `MicroGlotModel` backbone)."""
+
+    config_class = MicroGlotConfig
     base_model_prefix = "model"
     main_input_name = "input_ids"
     supports_gradient_checkpointing = True
     _no_split_modules = ["GenomicDecoderLayer"]
     _keys_to_ignore_on_load_missing = [r"rotary_emb"]
-    
+    # training-code checkpoints bundle the species encoder (here a separate model); base loads of a causal-LM
+    # checkpoint carry lm_head.
+    _keys_to_ignore_on_load_unexpected = [r"(^|\.)species_encoder\.", r"^lm_head\."]
+
     def _init_weights(self, module: nn.Module):
         if isinstance(module, nn.Linear):
             fan_in = module.weight.shape[1]
@@ -909,146 +989,450 @@ class GenomicPreTrainedModel(PreTrainedModel):
             # uninitialised after loading and relies on _init_weights to fill it.
             dim, base = module.dim, float(module.base)
             module.inv_freq.copy_(1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)))
-    
-    def to_bfloat16(self) -> "GenomicPreTrainedModel":
-        """Convert model weights to bfloat16 for memory-efficient training."""
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, species_encoder=None, **kwargs):
+        """The standard `from_pretrained`, plus `species_encoder`:
+
+        species_encoder (`bool` or `str`, *optional*): `True` also loads and attaches the Species-encoder, as
+            `model.load_species_encoder()` does; a repo id or a local path loads the encoder found there. To
+            attach an encoder object you already loaded, call `model.set_species_encoder(encoder)`.
+        """
+        if species_encoder is not None and not isinstance(species_encoder, (bool, str, _os.PathLike)):
+            raise TypeError(
+                "species_encoder= takes True (this model's Species-encoder), a repo id or a local path. "
+                "To attach an encoder object you already loaded, call model.set_species_encoder(encoder)."
+            )
+        if _DTYPE_KWARG == "torch_dtype" and "dtype" in kwargs:  # accept the newer `dtype=` before transformers 4.56
+            kwargs.setdefault("torch_dtype", kwargs.pop("dtype"))
+        model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+        # where this model came from: load_species_encoder() looks for the encoder there, at the same revision
+        if pretrained_model_name_or_path is not None:  # None: built from config= and state_dict=
+            source = _os.fspath(pretrained_model_name_or_path)
+            if _os.path.isdir(source):
+                source = _os.path.abspath(source)
+            revision = getattr(model.config, "_commit_hash", None) or kwargs.get("revision")
+            for m in (model, getattr(model, "model", None)):
+                if isinstance(m, MicroGlotModel):
+                    m.__dict__["_microglot_source"] = (source, revision)
+        if species_encoder:
+            hub = {k: kwargs[k] for k in ("cache_dir", "force_download", "local_files_only", "token", "proxies")
+                   if k in kwargs}
+            model.load_species_encoder(None if species_encoder is True else species_encoder, **hub)
+        return model
+
+    def to_bfloat16(self) -> "MicroGlotPreTrainedModel":
+        """Convert model weights to bfloat16 (the species table stays float32)."""
         return self.to(torch.bfloat16)
 
-class GenomicModel(GenomicPreTrainedModel):
-    """Genomic Language Model - decoder-only transformer backbone."""
-    def __init__(self, config: GenomicModelConfig):
+    # -- species-encoder composition, delegated to the backbone (MicroGlotModel implements it) ----------
+    def _microglot_backbone(self):
+        return getattr(self, "model", None)
+
+    @property
+    def species_encoder(self):
+        """The attached species encoder, or None."""
+        return self._microglot_backbone().species_encoder
+
+    def set_species_encoder(self, encoder, match_backbone: bool = True):
+        """Attach a species encoder you loaded yourself (None detaches); see `MicroGlotModel.set_species_encoder`."""
+        self._microglot_backbone().set_species_encoder(encoder, match_backbone=match_backbone)
+
+    def get_species_encoder(self):
+        """The attached species encoder, or None."""
+        return self._microglot_backbone().species_encoder
+
+    def load_species_encoder(self, *args, **kwargs):
+        """Load and attach the species encoder; see `MicroGlotModel.load_species_encoder`."""
+        return self._microglot_backbone().load_species_encoder(*args, **kwargs)
+
+    def get_species_embeds(self, *args, **kwargs):
+        """The species vectors the model would use; see `MicroGlotModel.get_species_embeds`."""
+        return self._microglot_backbone().get_species_embeds(*args, **kwargs)
+
+    def encode_species(self, species, unknown_species: str = "raise") -> torch.LongTensor:
+        """Species name(s) -> `species_ids` on the model's device: a 0-d tensor for one name, `[n]` for a list.
+
+        A thin wrapper over this repository's tokenizer (`tokenizer.convert_species_to_ids`; `None` -> -1,
+        loose matching, unknown names raise `KeyError` unless `unknown_species="infer"`), loaded once from
+        where the model was loaded and checked against `config.species_vocab_sha256`.
+        """
+        if not self.config.num_species:
+            raise ValueError("This checkpoint has no species table (MicroGlot-plain or the species encoder).")
+        tok = self.__dict__.get("_species_tokenizer")
+        if tok is None:
+            from transformers import AutoTokenizer
+
+            source = self.config._name_or_path
+            commit = getattr(self.config, "_commit_hash", None)
+            try:
+                tok = AutoTokenizer.from_pretrained(source, trust_remote_code=True,
+                                                    **({"revision": commit} if commit else {}))
+            except (OSError, ValueError):
+                tok = None
+            if getattr(tok, "species_vocab_sha256", None) is None:
+                raise ValueError(
+                    f"Could not load the MicroGlot tokenizer from {source!r}. Load it with AutoTokenizer."
+                    "from_pretrained('athanzli/MicroGlot', trust_remote_code=True) and call "
+                    "tokenizer.convert_species_to_ids(names)."
+                )
+            if tok.species_vocab_sha256 != self.config.species_vocab_sha256:
+                raise ValueError("The tokenizer's species list does not match this model's species table.")
+            self.__dict__["_species_tokenizer"] = tok
+        ids = tok.convert_species_to_ids(species, unknown_species=unknown_species)
+        return torch.tensor(ids, dtype=torch.long, device=self.device)
+
+
+class MicroGlotModel(MicroGlotPreTrainedModel):
+    """Decoder-only backbone (`AutoModel`). Returns token states aligned with `input_ids`.
+
+    Species inputs: `species_ids` (rows of the built-in table; -1 = infer), `species_embeds` (your own
+    vectors), or nothing (every row inferred by the attached species encoder). The encoder is held by
+    reference: not a submodule, so it is never in `parameters()`, `state_dict()` or a saved checkpoint and
+    never trained, but `.to()/.half()/.cuda()/.float()` reach it.
+    """
+
+    def __init__(self, config: MicroGlotConfig, species_encoder=None):
         super().__init__(config)
-        self.config = config
         self.gradient_checkpointing = False
-        self.embed_tokens = nn.Embedding(
-            config.vocab_size,
-            config.hidden_size
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.layers = nn.ModuleList(
+            [GenomicDecoderLayer(config, layer_idx=i) for i in range(config.num_hidden_layers)]
         )
-        self.layers = nn.ModuleList([
-            GenomicDecoderLayer(config, layer_idx=i)
-            for i in range(config.num_hidden_layers)
-        ])
         self.norm = nn.RMSNorm(normalized_shape=config.hidden_size)
-        
-        if config.use_species_encoder:
-            self.species_encoder = GenomicSpeciesEmbeddingEncoder(config)
-            for param in self.species_encoder.parameters():
-                param.requires_grad = False
-        else:
-            self.species_encoder = None
-        
-        if config.prepend_species_token:
-            self.species_token_proj = nn.Linear(config.species_emb_dim, config.hidden_size, bias=False)
-        else:
-            self.species_token_proj = None
-        
+        self.embed_species = (
+            MicroGlotSpeciesTable(config.num_species, config.species_emb_dim) if config.num_species else None
+        )
+        self.species_token_proj = (
+            nn.Linear(config.species_emb_dim, config.hidden_size, bias=False)
+            if config.prepend_species_token
+            else None
+        )
+        self.__dict__["_species_encoder"] = None
+        self.__dict__["_species_encoder_follow"] = True
         self.post_init()
+        if species_encoder is not None:
+            self.set_species_encoder(species_encoder)
+
+    def _microglot_backbone(self):
+        return self
+
+    @property
+    def species_encoder(self):
+        """The attached species encoder, or None."""
+        return self.__dict__.get("_species_encoder")
+
+    def set_species_encoder(self, encoder, match_backbone: bool = True):
+        """Attach (or with None detach) the encoder that infers species for rows without one.
+
+        The encoder is put in eval mode with `requires_grad_(False)`.
+        match_backbone=True (default): move/cast it to the backbone's device and dtype and give it exact rotary
+        frequencies in the backbone buffer's dtype, so the pair computes exactly what the training code's
+        combined model computed; later .to()/.half()/.cuda() calls on this model reach it too. match_backbone=False: leave it
+        where it is (e.g. another GPU); inputs are moved to it and its output is cast back.
+        """
+        if encoder is not None:
+            if self.config.species_emb_dim is None:
+                raise ValueError(
+                    "This checkpoint takes no species information (MicroGlot-plain, or the species encoder's own "
+                    "backbone), so it has no use for a species encoder."
+                )
+            if not hasattr(encoder, "projection") or getattr(
+                encoder.config, "species_encoder_embedding_dim", None
+            ) != self.config.species_emb_dim:
+                raise ValueError(
+                    f"Expected the Species-encoder (athanzli/MicroGlot, subfolder='species_encoder') or another "
+                    f"MicroGlotSpeciesEncoder "
+                    f"with {self.config.species_emb_dim}-d output."
+                )
+            encoder.eval().requires_grad_(False)
+            if match_backbone:
+                ref = self.embed_tokens.weight
+                encoder.to(device=ref.device, dtype=ref.dtype)
+                ref_rope = _rope_modules(self)
+                if ref_rope:
+                    # The cast above also rounds the encoder's rotary frequencies, which flash-attn reads as
+                    # they are when they are float32. Rebuild them exactly and give them the backbone buffer's
+                    # dtype, as the encoder inside the training code's combined model had.
+                    ref_inv = ref_rope[0].inv_freq
+                    for m in _rope_modules(encoder):
+                        inv_freq = 1.0 / (m.base ** (torch.arange(0, m.dim, 2, dtype=torch.float32) / m.dim))
+                        m.inv_freq = inv_freq.to(device=ref_inv.device, dtype=ref_inv.dtype)
+                        m._cos_cached, m._seq_len_cached = None, 0
+        self.__dict__["_species_encoder"] = encoder
+        self.__dict__["_species_encoder_follow"] = bool(match_backbone)
+
+    def get_species_encoder(self):
+        """The attached species encoder, or None."""
+        return self.species_encoder
+
+    def load_species_encoder(self, pretrained_model_name_or_path=None, *, subfolder=None, revision=None,
+                             match_backbone=True, **kwargs):
+        """Load the Species-encoder and attach it (see `set_species_encoder`); returns the encoder.
+
+        Default: the folder `config.species_encoder_subfolder` ("species_encoder") of the repository or local
+        folder this model was loaded from, at the same revision (or `config.species_encoder_repo` at
+        `config.species_encoder_revision` if set), in the model's dtype. Other keyword arguments go to
+        `from_pretrained` (e.g. `cache_dir`, `token`). It uses the encoder class in this code file.
+        """
+        if torch.is_inference_mode_enabled():
+            raise RuntimeError(
+                "Load the species encoder outside torch.inference_mode(): weights created inside it are "
+                "inference tensors and cannot be moved or cast afterwards."
+            )
+        if self.config.species_emb_dim is None:
+            raise ValueError("MicroGlot-plain takes no species information, so it has no species encoder.")
+        path = pretrained_model_name_or_path
+        if path is None:
+            if self.config.species_encoder_repo is not None:
+                path, revision = self.config.species_encoder_repo, revision or self.config.species_encoder_revision
+            else:
+                source, source_revision = self.__dict__.get("_microglot_source") or (self.config._name_or_path, None)
+                path, revision = source, revision or source_revision
+            subfolder = subfolder if subfolder is not None else self.config.species_encoder_subfolder
+            if not path:
+                raise ValueError("Pass the encoder's location, e.g. "
+                                 "model.load_species_encoder('athanzli/MicroGlot', subfolder='species_encoder').")
+        if subfolder:
+            kwargs["subfolder"] = subfolder
+        if revision is not None:
+            kwargs["revision"] = revision
+        if "torch_dtype" not in kwargs and "dtype" not in kwargs:
+            kwargs[_DTYPE_KWARG] = self.embed_tokens.weight.dtype
+        try:
+            encoder = MicroGlotSpeciesEncoder.from_pretrained(path, **kwargs)
+        except OSError as e:
+            raise OSError(
+                f"No Species-encoder found at {path!r}" + (f" (subfolder {subfolder!r})" if subfolder else "")
+                + ". Load it from the Hub: model.load_species_encoder('athanzli/MicroGlot', subfolder='species_encoder')."
+            ) from e
+        self.set_species_encoder(encoder, match_backbone=match_backbone)
+        return encoder
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        encoder = self.__dict__.get("_species_encoder")
+        if encoder is not None and self.__dict__.get("_species_encoder_follow", True):
+            encoder._apply(fn, recurse)
+        return self
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed_tokens
-    
+
     def set_input_embeddings(self, value: nn.Embedding):
         self.embed_tokens = value
-    
+
+    # -- species resolution -------------------------------------------------------------------------
+    @torch.no_grad()
+    def get_species_embeds(self, input_ids=None, attention_mask=None, species_ids=None, species_embeds=None,
+                           normalize_species_embeds: bool = True):
+        """The [batch, 32] unit vectors this model would condition on, in its dtype, without running the
+        backbone (prior rows from the table, custom vectors, inferred rows from the attached encoder).
+
+        Takes the same species arguments as `forward`; `input_ids` (and `attention_mask`) are only needed for
+        rows the encoder infers. Use it to inspect inferred species or to precompute a `species_embeds`
+        column (pass it back with `normalize_species_embeds=False` to reuse the exact vectors).
+        """
+        if input_ids is None:
+            ref = species_ids if species_ids is not None else species_embeds
+            if ref is None:
+                raise ValueError("Pass input_ids, species_ids or species_embeds.")
+            ref = torch.as_tensor(ref)
+            n = (ref.shape[0] if ref.dim() > 0 else 1) if species_ids is not None else (
+                ref.shape[0] if ref.dim() > 1 else 1)
+            if species_ids is not None and bool((ref < 0).any()):
+                raise ValueError("Rows to infer (species_ids == -1) need input_ids.")
+            input_ids = torch.full((n, 1), self.config.bos_token_id, device=self.embed_tokens.weight.device)
+        return self._species_vectors(input_ids, attention_mask, species_ids, species_embeds,
+                                     normalize_species_embeds)
+
+    def _species_vectors(self, input_ids, attention_mask, species_ids, species_embeds, normalize=True):
+        """Unit-norm species vectors [batch, species_emb_dim] in the model dtype, or None (plain)."""
+        dim = self.config.species_emb_dim
+        if dim is None:
+            if species_ids is not None or species_embeds is not None:
+                raise ValueError(
+                    "This checkpoint (MicroGlot-plain) takes no species information: drop the species "
+                    "inputs, or load athanzli/MicroGlot to condition on a species."
+                )
+            return None
+        if species_ids is not None and species_embeds is not None:
+            raise ValueError("You cannot specify both species_ids and species_embeds at the same time.")
+        batch, device, dtype = input_ids.shape[0], input_ids.device, self.embed_tokens.weight.dtype
+
+        if species_embeds is not None:  # the training code's `species_emb=` path (plus a no-op device move)
+            species_embeds = torch.as_tensor(species_embeds)
+            if species_embeds.dim() == 1:
+                species_embeds = species_embeds.unsqueeze(0)
+            if species_embeds.dim() != 2 or species_embeds.shape[-1] != dim:
+                raise ValueError(
+                    f"species_embeds must be [{dim}] or [batch, {dim}], got {tuple(species_embeds.shape)}."
+                )
+            if species_embeds.shape[0] == 1 and batch > 1:
+                species_embeds = species_embeds.expand(batch, -1)
+            elif species_embeds.shape[0] != batch:
+                raise ValueError(f"species_embeds has {species_embeds.shape[0]} rows for {batch} sequences.")
+            species_embeds = species_embeds.to(device=device)
+            if normalize:
+                return F.normalize(species_embeds.to(torch.float32), dim=-1).to(dtype)
+            norms = species_embeds.float().norm(dim=-1)
+            if bool(((norms - 1).abs() > 1e-2).any()):
+                raise ValueError(
+                    "normalize_species_embeds=False expects unit vectors that are used as they are (e.g. "
+                    "out.species_embeds or encoder(...).species_embeds)."
+                )
+            return species_embeds.to(dtype)
+
+        vectors, unknown = None, None
+        if species_ids is not None:
+            species_ids = torch.as_tensor(species_ids, device=device)
+            if species_ids.dim() == 0:
+                species_ids = species_ids.expand(batch)
+            if species_ids.shape != (batch,) or species_ids.dtype not in (torch.int64, torch.int32):
+                raise ValueError(f"species_ids must be an integer tensor of shape [{batch}].")
+            species_ids = species_ids.long()
+            if self.embed_species is None:
+                raise ValueError("This checkpoint has no species table; pass species_embeds instead.")
+            n = self.embed_species.weight.shape[0]
+            if bool(((species_ids < -1) | (species_ids >= n)).any()):
+                raise ValueError(f"species_ids must lie in [-1, {n}); -1 marks an unknown species.")
+            prior = self.embed_species(species_ids.clamp(min=0))
+            vectors = F.normalize(prior.to(torch.float32), dim=-1).to(dtype)
+            unknown = species_ids < 0
+            if not bool(unknown.any()):
+                return vectors
+
+        encoder = self.species_encoder
+        if encoder is None:
+            raise ValueError(
+                "No species given for some sequences and no species encoder is attached. Pass species= to "
+                "the tokenizer (or species_ids / species_embeds), or attach the encoder with "
+                "model.load_species_encoder(). For no species information, use MicroGlot-plain "
+                "(subfolder='plain')."
+            )
+        rows = slice(None) if unknown is None else unknown
+        enc_ids = input_ids[rows].to(encoder.device)
+        enc_mask = None if attention_mask is None else attention_mask[rows].to(encoder.device)
+        with torch.no_grad():
+            inferred = encoder(input_ids=enc_ids, attention_mask=enc_mask).species_embeds
+        inferred = inferred.to(device=device, dtype=dtype)
+        if unknown is None:
+            return inferred
+        vectors = vectors.clone()
+        vectors[unknown] = inferred
+        return vectors
+
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.LongTensor,
         attention_mask: Optional[torch.Tensor] = None,
-        species_emb: Optional[torch.Tensor] = None,
+        species_embeds: Optional[torch.FloatTensor] = None,
         output_hidden_states: Optional[bool] = None,
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, BaseModelOutput]:
-        """Forward pass through the decoder-only transformer."""
+        species_ids: Optional[torch.LongTensor] = None,
+        normalize_species_embeds: bool = True,
+        species_emb: Optional[torch.FloatTensor] = None,
+    ) -> Union[Tuple, MicroGlotModelOutput]:
+        """Token states for right-padded `input_ids` `[batch, length]` (each row starts with [BOS]).
+
+        Species (MicroGlot only; at most one of the two):
+            species_ids (`LongTensor` `[batch]`, or 0-d for the whole batch): rows of the species table
+                (`tokenizer(dna, species=...)` returns them); -1 = infer this row with the attached encoder.
+            species_embeds (`FloatTensor` `[batch, 32]` or `[32]`): your own vectors, any float dtype and norm;
+                normalised in float32 and cast to the model dtype. With `normalize_species_embeds=False` they
+                must already be unit vectors and are used as they are (exact replay of `out.species_embeds`).
+                `species_emb` (the training code's name) is also accepted.
+            Neither: every row is inferred by the attached species encoder (ValueError if none is attached).
+        output_hidden_states: also return the 24 hidden states. output_router_logits: compute `moe_loss`
+            (default: on). return_dict=False returns the tuple `(last_hidden_state, hidden_states, moe_loss)`.
+        The positional order is the training code's (the third argument is the species vector).
+        """
+        if not (input_ids.is_cuda and self.embed_tokens.weight.is_cuda):
+            raise RuntimeError(
+                "MicroGlot runs on an NVIDIA GPU (flash-attn's rotary kernel is CUDA-only): move the "
+                "model and the inputs to a CUDA device, e.g. model.to('cuda')."
+            )
+        if species_emb is not None:
+            if species_embeds is not None:
+                raise ValueError("Pass species_embeds or species_emb (the same argument), not both.")
+            species_embeds = species_emb
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None 
+            output_hidden_states if output_hidden_states is not None
             else self.config.output_hidden_states if hasattr(self.config, 'output_hidden_states') else False
         )
         output_router_logits = (
             output_router_logits if output_router_logits is not None
             else self.config.use_moe
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
+
+        if attention_mask is not None and not bool(attention_mask[:, 0].all()):
+            raise ValueError(
+                "MicroGlot needs right padding (every sequence starts with [BOS] at position 0); "
+                "tokenize with padding_side='right'."
+            )
+        if attention_mask is None and self.config.pad_token_id is not None and bool(
+            (input_ids == self.config.pad_token_id).any()
+        ):
+            raise ValueError("input_ids contain [PAD] but no attention_mask was given; pass the tokenizer's mask.")
+        if (
+            self.species_token_proj is not None
+            and (species_ids is not None or species_embeds is not None or self.species_encoder is not None)
+            and bool((input_ids[:, 0] != self.config.bos_token_id).any())
+        ):
+            raise ValueError(
+                "With a species, every sequence must start with [BOS] (the species token goes right after it); "
+                "tokenize with add_special_tokens=True."
+            )
         seq_len = input_ids.shape[1]
         max_trained = getattr(self.config, "max_trained_length", 8192)
         if seq_len > max_trained:
             warnings.warn(
-                f"Input sequence length ({seq_len} tokens) exceeds the maximum length "
-                f"seen during pretraining ({max_trained} tokens). RoPE positional "
-                f"encodings will extrapolate beyond the trained range, which may "
-                f"silently degrade output quality. Consider using "
-                f"model.chunk_and_encode() to process long sequences in chunks.",
+                f"Input sequence length ({seq_len} tokens) exceeds the maximum length seen during "
+                f"pretraining ({max_trained} tokens); split long sequences into windows "
+                "(tokenizer(..., truncation=True, max_length=8192, return_overflowing_tokens=True)).",
                 UserWarning,
                 stacklevel=3,
             )
+        if torch.is_grad_enabled():
+            # flash-attn rebuilds a cos/sin cache made under torch.inference_mode() only in training mode;
+            # in eval mode it cannot be saved for backward. Drop it (it is rebuilt with the same values).
+            for layer in self.layers:
+                rope = layer.self_attn.rotary_emb
+                if rope._cos_cached is not None and rope._cos_cached.is_inference():
+                    rope._cos_cached = None
 
+        species_emb = self._species_vectors(input_ids, attention_mask, species_ids, species_embeds,
+                                            normalize_species_embeds)
+
+        # ---- from here on: the forward used in training and benchmarking, unchanged ---------------
         hidden_states = self.embed_tokens(input_ids).to(self.embed_tokens.weight.dtype)
-
-        if species_emb is not None:
-            expected_dim = self.config.species_emb_dim
-            if expected_dim is None:
-                raise ValueError(
-                    "This checkpoint (MicroGlot-plain) takes no species information: drop species_emb, "
-                    "or load the repo-root MicroGlot checkpoint to condition on a species."
-                )
-            if species_emb.dim() == 1:
-                species_emb = species_emb.unsqueeze(0)
-            if species_emb.dim() != 2:
-                raise ValueError(
-                    f"species_emb must be 1-D [{expected_dim}] or 2-D [batch, {expected_dim}], "
-                    f"but has shape {tuple(species_emb.shape)}."
-                )
-            if species_emb.shape[-1] != expected_dim:
-                raise ValueError(
-                    f"species_emb must have exactly {expected_dim} dimensions, but got "
-                    f"{species_emb.shape[-1]} (shape {tuple(species_emb.shape)})."
-                )
-            batch_size_in = input_ids.shape[0]
-            if species_emb.shape[0] == 1 and batch_size_in > 1:
-                species_emb = species_emb.expand(batch_size_in, -1)
-            elif species_emb.shape[0] != batch_size_in:
-                raise ValueError(
-                    f"species_emb has batch size {species_emb.shape[0]} but input_ids has "
-                    f"{batch_size_in}. Pass one vector per sequence, or a single vector to "
-                    f"apply to the whole batch."
-                )
-            species_emb = F.normalize(
-                species_emb.to(torch.float32), dim=-1
-            ).to(self.embed_tokens.weight.dtype)
-
-        if species_emb is None and self.species_encoder is not None:
-            with torch.no_grad():
-                encoder_output = self.species_encoder(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                )
-            species_emb = F.normalize(encoder_output["embeddings"], dim=-1)
 
         if self.species_token_proj is not None and species_emb is not None:
             batch_size = hidden_states.size(0)
             device = hidden_states.device
-            
+
             species_token = self.species_token_proj(species_emb).unsqueeze(1).to(hidden_states.dtype)
-            
+
             bos_embedding = hidden_states[:, :1, :]
             rest_embeddings = hidden_states[:, 1:, :]
-            
+
             hidden_states = torch.cat([bos_embedding, species_token, rest_embeddings], dim=1)
-            
+
             if attention_mask is not None:
                 species_mask = torch.ones(batch_size, 1, dtype=attention_mask.dtype, device=device)
                 bos_mask = attention_mask[:, :1]
                 rest_mask = attention_mask[:, 1:]
                 attention_mask = torch.cat([bos_mask, species_mask, rest_mask], dim=1)
-        
+
         all_hidden_states = () if output_hidden_states else None
         total_moe_loss = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32) if output_router_logits else None
-        
+
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
-            
+
             if self.gradient_checkpointing and self.training:
                 layer_outputs = checkpoint(
                     layer,
@@ -1059,12 +1443,12 @@ class GenomicModel(GenomicPreTrainedModel):
                 )
             else:
                 layer_outputs = layer(hidden_states, attention_mask=attention_mask, species_emb=species_emb)
-            
+
             hidden_states, moe_loss = layer_outputs
-            
+
             if output_router_logits and moe_loss is not None:
                 total_moe_loss = total_moe_loss + moe_loss
-        
+
         hidden_states = self.norm(hidden_states)
 
         if output_hidden_states:
@@ -1085,83 +1469,97 @@ class GenomicModel(GenomicPreTrainedModel):
 
         if not return_dict:
             return (hidden_states, all_hidden_states, total_moe_loss)
-        
-        return GenomicModelOutput(
+
+        return MicroGlotModelOutput(
             last_hidden_state=hidden_states,
             hidden_states=all_hidden_states,
             moe_loss=total_moe_loss,
+            species_embeds=species_emb,
         )
 
-class GenomicLMForCausalLM(GenomicPreTrainedModel, GenerationMixin):
-    """Genomic Language Model for causal (autoregressive) language modeling."""
-    _tied_weights_keys = ["lm_head.weight"]
-    
-    def __init__(self, config: GenomicModelConfig):
+
+class MicroGlotForCausalLM(MicroGlotPreTrainedModel):
+    """MicroGlot with its next-token head (`AutoModelForCausalLM`, the released checkpoints' class).
+
+    `lm_head` is tied to the input embeddings. Sequence generation is not supported.
+    """
+
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}  # dict: required by transformers 5
+
+    def __init__(self, config: MicroGlotConfig, species_encoder=None):
         super().__init__(config)
-        self.model = GenomicModel(config)
+        self.model = MicroGlotModel(config, species_encoder=species_encoder)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
-    
+
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
-    
+
     def set_input_embeddings(self, value: nn.Embedding):
         self.model.embed_tokens = value
-        
+
     def get_output_embeddings(self) -> nn.Linear:
         return self.lm_head
-    
+
     def set_output_embeddings(self, new_embeddings: nn.Linear):
         self.lm_head = new_embeddings
-    
-    def tie_weights(self, **kwargs):
-        """Tie input embeddings to output lm_head weights."""
+
+    def tie_weights(self, missing_keys=None, recompute_mapping=True, **kwargs):
+        """Always tie lm_head to the input embeddings, as in training (also for configs without
+        tie_word_embeddings); under transformers 5 also clear the tied key from the load report."""
         self.lm_head.weight = self.model.embed_tokens.weight
-    
+        if missing_keys is not None:
+            missing_keys.discard("lm_head.weight")
+
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.LongTensor,
         attention_mask: Optional[torch.Tensor] = None,
-        species_emb: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
+        species_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
         output_hidden_states: Optional[bool] = None,
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         skip_lm_head: bool = False,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        """Forward pass with optional causal LM loss computation."""
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
+        species_ids: Optional[torch.LongTensor] = None,
+        normalize_species_embeds: bool = True,
+        species_emb: Optional[torch.FloatTensor] = None,
+    ) -> Union[Tuple, MicroGlotCausalLMOutput]:
+        """Next-token logits `[batch, length, vocab]`; the species arguments are those of `MicroGlotModel.forward`.
+
+        labels (`LongTensor` `[batch, length]`, -100 = ignored): `loss` = mean next-token cross-entropy, plus the
+            router loss (`moe_loss`) unless `output_router_logits=False`. With a species token the first
+            prediction (made at [BOS], before the model has seen the species) is excluded, as in pretraining.
+        skip_lm_head: return only the final hidden state (in `hidden_states`).
+        return_dict=False returns the tuple `([loss,] logits, hidden_states, moe_loss)`.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
         output_router_logits = (
             output_router_logits if output_router_logits is not None
             else self.config.use_moe
         )
-        
         outputs = self.model(
-            input_ids=input_ids, 
+            input_ids=input_ids,
             attention_mask=attention_mask,
+            species_ids=species_ids,
+            species_embeds=species_embeds,
             species_emb=species_emb,
+            normalize_species_embeds=normalize_species_embeds,
             output_hidden_states=output_hidden_states,
             output_router_logits=output_router_logits,
-            return_dict=return_dict,
+            return_dict=True,
         )
-        
-        hidden_states = outputs[0] if not return_dict else outputs.last_hidden_state
+        hidden_states = outputs.last_hidden_state
 
         if skip_lm_head:
-            return CausalLMOutputWithPast(loss=None, logits=None, hidden_states=hidden_states)
+            return MicroGlotCausalLMOutput(loss=None, logits=None, hidden_states=hidden_states)
 
         logits = self.lm_head(hidden_states)
-
-        moe_aux_loss = outputs.moe_loss if return_dict else None
-        if not return_dict and len(outputs) > 2:
-            moe_aux_loss = outputs[2] if outputs[2] is not None else None
+        moe_aux_loss = outputs.moe_loss
 
         loss = None
         if labels is not None:
-            species_was_prepended = self.config.prepend_species_token and (
-                species_emb is not None or self.model.species_encoder is not None
-            )
+            species_was_prepended = self.config.prepend_species_token and outputs.species_embeds is not None
             if species_was_prepended:
                 shift_logits = logits[..., 1:-1, :].contiguous()
                 shift_labels = labels[..., 2:].contiguous()
@@ -1179,125 +1577,42 @@ class GenomicLMForCausalLM(GenomicPreTrainedModel, GenerationMixin):
                 loss = loss + moe_aux_loss
 
         if not return_dict:
-            output = (logits,) + outputs[1:]
+            output = (logits, outputs.hidden_states, outputs.moe_loss)
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return MicroGlotCausalLMOutput(
             loss=loss,
             logits=logits,
-            hidden_states=outputs.hidden_states if return_dict else None,
+            hidden_states=outputs.hidden_states,
+            species_embeds=outputs.species_embeds,
         )
-    
-    @torch.no_grad()
-    def chunk_and_encode(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        species_emb: Optional[torch.Tensor] = None,
-        max_length: Optional[int] = None,
-    ) -> torch.Tensor:
-        """Encode a sequence of any length into a single fixed-size embedding."""
-        if input_ids.dim() != 2 or input_ids.shape[0] != 1:
-            raise ValueError(
-                f"chunk_and_encode expects input_ids of shape [1, seq_len], "
-                f"got {list(input_ids.shape)}"
-            )
-
-        if max_length is None:
-            max_length = getattr(self.config, "max_trained_length", 8192)
-
-        seq_len = input_ids.shape[1]
-        device = input_ids.device
-        bos_id = self.config.bos_token_id
-        eos_id = self.config.eos_token_id
-
-        def _mean_pool_content(hidden_states, chunk_len):
-            """Mean-pool over content positions (exclude BOS at 0, keep EOS at end)."""
-            if chunk_len <= 1:
-                return hidden_states.mean(dim=1)
-            content = hidden_states[:, 1:, :]
-            return content.mean(dim=1)
-
-        if seq_len <= max_length:
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                species_emb=species_emb,
-                return_dict=True,
-            )
-            return _mean_pool_content(outputs.last_hidden_state, seq_len)
-
-        all_ids = input_ids[0]
-        has_bos = (all_ids[0].item() == bos_id)
-        has_eos = (all_ids[-1].item() == eos_id)
-
-        content_start = 1 if has_bos else 0
-        content_end = seq_len - 1 if has_eos else seq_len
-        content_ids = all_ids[content_start:content_end]
-
-        content_per_chunk = max_length - 2
-        if content_per_chunk < 1:
-            raise ValueError(f"max_length ({max_length}) must be >= 3 to fit BOS + content + EOS")
-
-        chunk_embeddings = []
-        for i in range(0, len(content_ids), content_per_chunk):
-            chunk_content = content_ids[i:i + content_per_chunk]
-
-            chunk_ids = torch.cat([
-                torch.tensor([bos_id], device=device),
-                chunk_content,
-                torch.tensor([eos_id], device=device),
-            ]).unsqueeze(0)
-
-            chunk_mask = torch.ones_like(chunk_ids)
-
-            outputs = self.model(
-                input_ids=chunk_ids,
-                attention_mask=chunk_mask,
-                species_emb=species_emb,
-                return_dict=True,
-            )
-            emb = _mean_pool_content(outputs.last_hidden_state, chunk_ids.shape[1])
-            chunk_embeddings.append(emb)
-
-        embedding = torch.stack(chunk_embeddings, dim=0).mean(dim=0)
-        return embedding
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        **kwargs,
-    ):
-        """Prepare inputs for generation (used by HuggingFace generate())."""
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-        }
 
 
-class GenomicSpeciesEmbeddingEncoder(GenomicPreTrainedModel):
-    """Genomic Species Embedding Encoder - predicts species embeddings from sequences."""
 
-    def __init__(self, config: GenomicModelConfig):
+class MicroGlotSpeciesEncoder(MicroGlotPreTrainedModel):
+    """Predicts a species embedding from DNA (folder species_encoder/ of athanzli/MicroGlot, `AutoModel`).
+
+    A MicroGlot backbone without species input, pooled at the last real token (needs right padding), then a
+    Linear -> GELU -> Linear projection to 32 dimensions (`embeddings`), L2-normalised in the model dtype
+    (`species_embeds`, the vector MicroGlot is conditioned on).
+    """
+
+    config_class = MicroGlotSpeciesEncoderConfig
+
+    def __init__(self, config: MicroGlotSpeciesEncoderConfig):
         super().__init__(config)
+        if config.species_emb_dim is not None or config.prepend_species_token:
+            raise ValueError("The species encoder's backbone takes no species input (species_emb_dim=None).")
         self.embedding_dim = config.species_encoder_embedding_dim
         self.pooling_strategy = config.species_encoder_pooling_strategy
-
-        import copy
-        inner_config = copy.deepcopy(config)
-        inner_config.use_species_encoder = False
-        inner_config.prepend_species_token = False
-        self.model = GenomicModel(inner_config)
-
+        self.model = MicroGlotModel(config)
         self.projection_dropout = nn.Dropout(config.classifier_dropout_prob)
-        self.projection = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size),
-            nn.GELU(),
-            nn.Linear(config.hidden_size, config.species_encoder_embedding_dim),
-        )
-
+        self.projection = MicroGlotHead(config.hidden_size, config.hidden_size, config.species_encoder_embedding_dim)
         self.post_init()
+
+    def load_species_encoder(self, *args, **kwargs):
+        """Not available: this is the species encoder itself."""
+        raise TypeError("This is the species encoder; it takes no species encoder of its own.")
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
@@ -1307,14 +1622,17 @@ class GenomicSpeciesEmbeddingEncoder(GenomicPreTrainedModel):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.LongTensor,
         attention_mask: Optional[torch.Tensor] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """Forward pass to get predicted species embeddings."""
-        return_dict = return_dict if return_dict is not None else True
+    ) -> Union[Tuple, MicroGlotSpeciesEncoderOutput]:
+        """Species vectors for right-padded `input_ids` `[batch, length]` (one per sequence).
 
+        return_dict=False returns `(species_embeds, embeddings, pooler_output, last_hidden_state,
+        hidden_states)`.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1322,7 +1640,6 @@ class GenomicSpeciesEmbeddingEncoder(GenomicPreTrainedModel):
             output_router_logits=self.config.use_moe,
             return_dict=True,
         )
-
         hidden_states = outputs.last_hidden_state
 
         if self.pooling_strategy == "eos":
@@ -1341,14 +1658,31 @@ class GenomicSpeciesEmbeddingEncoder(GenomicPreTrainedModel):
                 pooled = hidden_states.mean(dim=1)
 
         pooled = self.projection_dropout(pooled)
-        embeddings = self.projection(pooled)
+        raw = self.projection(pooled)
+        species_embeds = F.normalize(raw, dim=-1)
 
-        moe_loss = outputs.moe_loss if hasattr(outputs, 'moe_loss') else None
+        if not return_dict:
+            return (species_embeds, raw, pooled, hidden_states, outputs.hidden_states)
+        return MicroGlotSpeciesEncoderOutput(
+            species_embeds=species_embeds,
+            embeddings=raw,
+            pooler_output=pooled,
+            last_hidden_state=hidden_states,
+            hidden_states=outputs.hidden_states,
+            moe_loss=outputs.moe_loss,
+        )
 
-        return {
-            "embeddings": embeddings,
-            "hidden_states": outputs.hidden_states if output_hidden_states else None,
-            "moe_loss": moe_loss,
-        }
 
+# Training-code names (configs and auto_maps written by the training code keep resolving).
+GenomicPreTrainedModel = MicroGlotPreTrainedModel
+GenomicModel = MicroGlotModel
+GenomicLMForCausalLM = MicroGlotForCausalLM
+GenomicSpeciesEmbeddingEncoder = MicroGlotSpeciesEncoder
+GenomicModelOutput = MicroGlotModelOutput
 
+# save_pretrained() then copies this file and writes local auto_map entries, also for Hub-loaded models.
+MicroGlotConfig.register_for_auto_class("AutoConfig")
+MicroGlotSpeciesEncoderConfig.register_for_auto_class("AutoConfig")
+MicroGlotModel.register_for_auto_class("AutoModel")
+MicroGlotForCausalLM.register_for_auto_class("AutoModelForCausalLM")
+MicroGlotSpeciesEncoder.register_for_auto_class("AutoModel")

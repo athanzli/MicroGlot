@@ -7,70 +7,149 @@ nucleotides** from **3.70 million sequences** across **99,700 microbial species*
 fungi, protists, viruses and plasmids. It encodes the taxonomic hierarchy as hyperbolic (Poincaré)
 embeddings and uses them both as an input token and to steer expert routing.
 
-For details, see our manuscript, [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1).
+**Paper:** [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v2)
+· **Models:** [huggingface.co/athanzli/MicroGlot](https://huggingface.co/athanzli/MicroGlot)
 
-This repository holds the source code. The model weights, tokenizer and species assets are on
-Hugging Face: [huggingface.co/athanzli/MicroGlot](https://huggingface.co/athanzli/MicroGlot).
+## Models
 
-## Install
+| Model | Input | Use it when | Load with |
+|---|---|---|---|
+| **MicroGlot** | DNA and its species | most of your sequences have a known species | `from_pretrained("athanzli/MicroGlot", ...)` |
+| **MicroGlot-plain** | DNA | most of your sequences have no known species | `from_pretrained("athanzli/MicroGlot", subfolder="plain", ...)` |
+
+A species is known if it is one of the 99,700 pretraining species (check with `tokenizer.has_species(name)`).
+For tasks that predict taxonomy, use MicroGlot-plain: giving the model the species would reveal the answer.
+
+## Installation
+
+MicroGlot runs on Linux with an NVIDIA GPU and requires [FlashAttention-2](https://github.com/Dao-AILab/flash-attention)
+(`flash-attn`), whose rotary position-embedding kernel it was trained with. Install everything in a new
+Python 3.12 environment, for example with conda:
 
 ```bash
-git clone https://github.com/athanzli/MicroGlot.git
-cd MicroGlot
-pip install -r requirements.txt
-python example.py   # smoke test; the first run downloads the models (~18 GB)
+conda create -n microglot python=3.12 -y
+conda activate microglot
+pip install torch==2.8.0 "transformers>=4.51.3,<5.19"
+pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1%2Bcu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 ```
 
-Run your code from this folder, or copy `microglot.py` next to your script or notebook.
-A GPU with 16 GB of memory runs either model; without a GPU, MicroGlot runs on the CPU, more slowly.
+Tested with Python 3.10–3.13, PyTorch 2.7–2.13, transformers 4.51.3–5.18 and flash-attn 2.7.4–2.8.3.post1.
+For another Python or PyTorch version, install the matching flash-attn wheel from the
+[flash-attn releases](https://github.com/Dao-AILab/flash-attention/releases).
 
-## Quickstart
+## Usage
+
+### MicroGlot
 
 ```python
-from microglot import MicroGlot
+import torch
+from transformers import AutoModel, AutoTokenizer
 
-model = MicroGlot.from_pretrained("athanzli/MicroGlot")
-dna = "ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCCAATTCTTGTTGAATTAGATGGT"
+tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True)
+model = AutoModel.from_pretrained(
+    "athanzli/MicroGlot", trust_remote_code=True, dtype=torch.bfloat16
+).to("cuda")
 
-# 1. species known: use its taxonomy embedding
-emb = model.embed(dna, species="Escherichia coli")   # [1, 1024]
+sequences = ["ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC", "TTGACAGCTAGCTCAGTCCTAGGTATAATGCTAGC"]
+species = ["Escherichia coli", "Bacillus subtilis"]
 
-# 2. species unknown: the built-in encoder infers it from the sequence
-emb = model.embed(dna)
+inputs = tokenizer(sequences, species=species, padding=True, return_tensors="pt").to("cuda")
+with torch.no_grad():
+    outputs = model(**inputs, output_hidden_states=True)
 
-# 3. no species information: use MicroGlot-plain (on a 16 GB GPU, run `del model` first)
-plain = MicroGlot.from_pretrained("athanzli/MicroGlot", variant="plain")
-emb = plain.embed(dna)
-
-# a specific decoder layer (1 to 23; intermediate layers often work better than the last one)
-emb = model.embed(dna, species="Escherichia coli", layer=11)
+last_layer = outputs.last_hidden_state   # [2, length, 1024]
+layer_11 = outputs.hidden_states[11]     # [2, length, 1024], decoder layer 11
 ```
 
-For embedding your own FASTA files, long sequences, the species assets and the standard
-`transformers` interface, see the [model card](https://huggingface.co/athanzli/MicroGlot).
+- `species=` takes one name per sequence, or one name for all of them. Case, extra spaces, underscores
+  and hyphens do not matter. A name outside the 99,700 species raises a `KeyError` that suggests close
+  matches.
+- `outputs.hidden_states[k]` is the output of decoder layer k (1 to 22); `[0]` holds the token
+  embeddings, and `[23]` is `last_hidden_state`, the output of layer 23 after the final normalization.
+  Intermediate layers often give better features than the last one. All outputs line up with
+  `input_ids`; padded positions have `attention_mask` 0.
+
+### Sequences without a known species
+
+If a small portion of your sequences have no known species, use the Species-encoder to infer their
+species embeddings from the DNA and fill these gaps. Continuing the MicroGlot example, pass `None` as
+their species:
+
+```python
+model.load_species_encoder()   # downloads the Species-encoder (6 GB) and attaches it to MicroGlot
+
+inputs = tokenizer(sequences, species=["Escherichia coli", None], padding=True, return_tensors="pt").to("cuda")
+with torch.no_grad():
+    outputs = model(**inputs, output_hidden_states=True)   # the second sequence's species is inferred
+```
+
+If most of your sequences have no known species, use MicroGlot-plain instead.
+
+### Long sequences
+
+The context is 8,192 tokens (about 43 kb). To encode a longer sequence, one viable way is "chunk and
+encode", by cutting the sequence into windows that fit the context and encoding each window. Continuing
+the MicroGlot example, the tokenizer does the chunking:
+
+```python
+genome = "ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC" * 3000   # stand-in for a 114 kb sequence
+windows = tokenizer(genome, species="Escherichia coli", truncation=True, max_length=8192,
+                    return_overflowing_tokens=True, padding=True, return_tensors="pt")
+windows.pop("overflow_to_sample_mapping")   # not a model input
+
+with torch.no_grad():
+    for i in range(0, len(windows["input_ids"]), 4):        # 4 windows at a time
+        batch = {k: v[i:i + 4].to("cuda") for k, v in windows.items()}
+        window_states = model(**batch).last_hidden_state     # [windows, 8192, 1024]; use them before the next batch
+```
+
+### MicroGlot-plain
+
+```python
+import torch
+from transformers import AutoModel, AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", subfolder="plain", trust_remote_code=True)
+model = AutoModel.from_pretrained(
+    "athanzli/MicroGlot", subfolder="plain", trust_remote_code=True, dtype=torch.bfloat16
+).to("cuda")
+
+sequences = ["ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC", "TTGACAGCTAGCTCAGTCCTAGGTATAATGCTAGC"]
+
+inputs = tokenizer(sequences, padding=True, return_tensors="pt").to("cuda")
+with torch.no_grad():
+    outputs = model(**inputs, output_hidden_states=True)
+
+last_layer = outputs.last_hidden_state   # [2, length, 1024]
+```
+
+MicroGlot-plain takes no species; everything else works as for MicroGlot.
+
+### DNA input
+
+- Case does not matter. N, the IUPAC ambiguity codes and any other character (spaces, line breaks,
+  `-`, `U`) each become one N token, so pass bare DNA (for RNA, replace U with T).
+- A sequence can have up to 8,192 tokens, [BOS] and [EOS] included (about 43 kb).
+- MicroGlot reads the strand you give it; it does not add the reverse complement.
 
 ## Repository contents
 
 | Path | Description |
 |---|---|
-| `microglot.py` | Helper for loading the model and computing embeddings |
-| `modeling_microglot.py` | Model architecture |
-| `example.py` | Minimal end-to-end example |
+| `modeling_microglot.py`, `tokenization_microglot.py` | Model and tokenizer code, identical to the copies on Hugging Face |
+| `example.py` | The MicroGlot and MicroGlot-plain examples above as one script: `python example.py` |
 | `taxonomy/` | Scripts that fit the Poincaré taxonomy embeddings and build the species lookup table (run with `--help`) |
 | `training/tokenizer.py` | Byte-pair-encoding tokenizer used for pretraining |
 | `benchmarks/baselines.py` | Embedding extractors for the baseline models evaluated in the paper |
 
-`microglot.py`, `modeling_microglot.py` and `example.py` are identical to the copies on Hugging Face.
-
 ## Licence
 
-Source code in this repository is released under the [MIT License](LICENSE).
-The model weights and species assets on Hugging Face are released under
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+Source code in this repository is released under the [MIT License](LICENSE). The model weights and species
+assets on Hugging Face are released under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ## Citation
 
-If you use MicroGlot, please cite our manuscript, [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1):
+If you use MicroGlot, please cite our manuscript, [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v2):
 
 > Li, A. Z., Wang, S., Cheng, S., Du, Y. & Liu, R. A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics. *bioRxiv* (2026). https://doi.org/10.64898/2026.09.22.753215
 
@@ -81,6 +160,6 @@ If you use MicroGlot, please cite our manuscript, [A Taxonomy-Informed Sparse DN
   journal = {bioRxiv},
   year    = {2026},
   doi     = {10.64898/2026.09.22.753215},
-  url     = {https://www.biorxiv.org/content/10.64898/2026.09.22.753215v1}
+  url     = {https://www.biorxiv.org/content/10.64898/2026.09.22.753215v2}
 }
 ```

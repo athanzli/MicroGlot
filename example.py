@@ -1,33 +1,41 @@
-"""Minimal MicroGlot example."""
+"""The README's MicroGlot and MicroGlot-plain examples as one script: python example.py
 
+The first run downloads both models (about 12 GB).
+"""
 import torch
+from transformers import AutoModel, AutoTokenizer
 
-from microglot import MicroGlot
+# MicroGlot: DNA and its species
+tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True)
+model = AutoModel.from_pretrained(
+    "athanzli/MicroGlot", trust_remote_code=True, dtype=torch.bfloat16
+).to("cuda")
 
-DNA = (
-    "ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCCAATTCTTGTTGAATTAGATGGTGATGTT"
-    "AATGGGCACAAATTTTCTGTCAGTGGAGAGGGTGAAGGTGATGCAACATACGGAAAACTTACCCTT"
-)
+sequences = ["ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC", "TTGACAGCTAGCTCAGTCCTAGGTATAATGCTAGC"]
+species = ["Escherichia coli", "Bacillus subtilis"]
 
-model = MicroGlot.from_pretrained("athanzli/MicroGlot")
+inputs = tokenizer(sequences, species=species, padding=True, return_tensors="pt").to("cuda")
+with torch.no_grad():
+    outputs = model(**inputs, output_hidden_states=True)
 
-known = model.embed(DNA, species="Escherichia coli")
+last_layer = outputs.last_hidden_state   # [2, length, 1024]
+layer_11 = outputs.hidden_states[11]     # [2, length, 1024], decoder layer 11
+print("MicroGlot:      ", len(outputs.hidden_states), "hidden states of shape", tuple(last_layer.shape))
 
-inferred = model.embed(DNA)
-
-cos = torch.nn.functional.cosine_similarity(known, inferred).item()
-print(f"embedding shape            : {tuple(known.shape)}")
-print(f"cos(known prior, inferred) : {cos:.4f}")
-
-other = model.embed(DNA, species="Saccharomyces cerevisiae")
-print(f"cos(E. coli, S. cerevisiae): "
-      f"{torch.nn.functional.cosine_similarity(known, other).item():.4f}")
-
-states, _ = model.hidden_states(DNA, species="Escherichia coli")
-print(f"hidden states              : {len(states)} x {tuple(states[-1].shape)}")
-
-del model, states                  # free GPU memory before loading the second model
+del model, outputs
 torch.cuda.empty_cache()
 
-plain = MicroGlot.from_pretrained("athanzli/MicroGlot", variant="plain")
-print(f"plain embedding shape      : {tuple(plain.embed(DNA).shape)}")
+# MicroGlot-plain: DNA only
+tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", subfolder="plain", trust_remote_code=True)
+model = AutoModel.from_pretrained(
+    "athanzli/MicroGlot", subfolder="plain", trust_remote_code=True, dtype=torch.bfloat16
+).to("cuda")
+
+sequences = ["ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC", "TTGACAGCTAGCTCAGTCCTAGGTATAATGCTAGC"]
+
+inputs = tokenizer(sequences, padding=True, return_tensors="pt").to("cuda")
+with torch.no_grad():
+    outputs = model(**inputs, output_hidden_states=True)
+
+last_layer = outputs.last_hidden_state   # [2, length, 1024]
+print("MicroGlot-plain:", len(outputs.hidden_states), "hidden states of shape", tuple(last_layer.shape))
