@@ -22,6 +22,9 @@ env/
 *.npz
 *.h5
 
+# Written by the evo2 package when it is imported
+activations_debug.log
+
 # Editor / OS noise
 .ipynb_checkpoints/
 .DS_Store

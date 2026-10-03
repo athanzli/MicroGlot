@@ -43,8 +43,8 @@ MODEL_CONFIGS = {
         "max_length": 2048,
         "pooling": "mean",
     },
-    "Evo2-7B-1M-ml8192": {
-        "model_name": "evo2_7b",
+    "Evo2-7B-base": {
+        "model_name": "evo2_7b_base",
         "max_length": 8192,
         "pooling": "mean",
     },
@@ -105,19 +105,6 @@ def tokenize_full_sequence(sequence: str, tokenizer) -> list:
     return list(ids[0])
 
 
-import re as _re
-
-def _sanitize_dna(sequence: str) -> str:
-    """Replace non-ACGT characters with random valid nucleotides."""
-    if not _re.search(r'[^ACGT]', sequence):
-        return sequence
-    import random
-    return ''.join(
-        c if c in 'ACGT' else random.choice('ACGT')
-        for c in sequence
-    )
-
-
 def chunk_and_encode(
     sequence: str,
     extractor,
@@ -125,9 +112,7 @@ def chunk_and_encode(
     max_length: int,
     device: str = "cuda",
 ) -> torch.Tensor:
-    """Encode a sequence, chunking it if it is longer than max_length."""
-    sequence = _sanitize_dna(sequence)
-
+    """Encode a sequence as the model's tokenizer reads it, chunking it if it is longer than max_length."""
     all_ids = tokenize_full_sequence(sequence, tokenizer)
 
     if len(all_ids) <= max_length:
@@ -533,7 +518,7 @@ class Evo2Extractor(BaseExtractor):
     def __init__(self, model_name: str = None, device: str = "cuda"):
         super().__init__(device)
 
-        model_name = model_name or MODEL_CONFIGS["Evo2-7B-1M-ml8192"]["model_name"]
+        model_name = model_name or MODEL_CONFIGS["Evo2-7B-base"]["model_name"]
 
         if self._use_bf16_autocast:
             _patch_evo2_flash_attn()
@@ -619,7 +604,7 @@ EXTRACTOR_CLASSES = {
     "NT-v2-500M": NTExtractor,
     "NT-2.5B-multi-species": NTExtractor,
     "ProkBERT-mini-long": ProkBERTExtractor,
-    "Evo2-7B-1M-ml8192": Evo2Extractor,
+    "Evo2-7B-base": Evo2Extractor,
 }
 
 

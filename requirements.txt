@@ -10,8 +10,12 @@ flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8
 numpy
 pandas
 
-# Only for benchmarks/baselines.py (reproducing the baseline embeddings):
-# einops       required by the custom modelling code that the DNABERT / NT / ProkBERT checkpoints load
-#              with trust_remote_code=True
-# pyyaml       used to rewrite an Evo2 config so it loads without Transformer Engine
-# evo2         the Evo2 baseline only; pulls in its `vortex` dependency
+# Only for training/ and benchmarks/:
+# pyarrow       training/train_bpe_tokenizer.py
+# scikit-learn  benchmarks/layer_sweep.py and finetune_lora.py
+# scipy         benchmarks/layer_sweep.py
+# peft==0.13.2  benchmarks/finetune_lora.py
+# einops        required by the custom modelling code that the DNABERT / NT / ProkBERT checkpoints load
+#               with trust_remote_code=True
+# pyyaml        used to rewrite an Evo2 config so it loads without Transformer Engine
+# evo2          the Evo2 baseline only; pulls in its `vortex` dependency

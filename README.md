@@ -140,8 +140,10 @@ MicroGlot-plain takes no species; everything else works as for MicroGlot.
 | `modeling_microglot.py`, `tokenization_microglot.py` | Model and tokenizer code, identical to the copies on Hugging Face |
 | `example.py` | The MicroGlot and MicroGlot-plain examples above as one script: `python example.py` |
 | `taxonomy/` | Scripts that fit the Poincaré taxonomy embeddings and build the species lookup table (run with `--help`) |
-| `training/tokenizer.py` | Byte-pair-encoding tokenizer used for pretraining |
+| `training/` | The byte-pair-encoding tokenizer (`tokenizer.py`) and how it was trained: `subsample_bpe_sequences.py` picks one sequence per species, `train_bpe_tokenizer.py` trains it |
 | `benchmarks/baselines.py` | Embedding extractors for the baseline models evaluated in the paper |
+| `benchmarks/layer_sweep.py` | Layer-wise probing: mean-pooled embeddings from every layer and an MLP probe per layer |
+| `benchmarks/finetune_lora.py` | LoRA fine-tuning on the GUE tasks |
 
 ## Licence
 
