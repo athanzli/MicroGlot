@@ -7,8 +7,8 @@ nucleotides** from **3.70 million sequences** across **99,700 microbial species*
 fungi, protists, viruses and plasmids. It encodes the taxonomic hierarchy as hyperbolic (Poincaré)
 embeddings and uses them both as an input token and to steer expert routing.
 
-**Paper:** [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v2)
-· **Models:** [huggingface.co/athanzli/MicroGlot](https://huggingface.co/athanzli/MicroGlot)
+**Paper:** [A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v2)\
+**Models:** [huggingface.co/athanzli/MicroGlot](https://huggingface.co/athanzli/MicroGlot)
 
 ## Models
 
