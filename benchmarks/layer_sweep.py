@@ -30,8 +30,8 @@ import baselines  # noqa: E402
 
 
 class MicroGlotLayers:
-    """Every hidden state of MicroGlot or MicroGlot-plain, mean-pooled over all tokens except padding
-    (the species token is not among MicroGlot's outputs)."""
+    """Every hidden state of MicroGlot or MicroGlot-plain, mean-pooled over all tokens except padding and the species
+    token (MicroGlot removes the species token from the hidden states it returns)."""
     supports_chunk_batching = True
 
     def __init__(self, plain, species):

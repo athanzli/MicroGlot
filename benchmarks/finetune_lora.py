@@ -211,7 +211,7 @@ class Classifier(nn.Module):
             species["species_ids"] = torch.full((len(input_ids),), self.species_id, device=input_ids.device)
         out = self.backbone(input_ids=input_ids, attention_mask=attention_mask, **species)
         h = out[0] if isinstance(out, tuple) else out.last_hidden_state  # DNABERT-2/-S return a tuple
-        # mean over every token except padding (MicroGlot's species token is not among its outputs)
+        # mean over every token except padding and MicroGlot's species token (the model removes it from its outputs)
         m = attention_mask.unsqueeze(-1).to(h.dtype)
         pooled = (h * m).sum(1, dtype=torch.float32) / m.sum(1, dtype=torch.float32).clamp(min=1)
         with torch.autocast(device_type=pooled.device.type, enabled=False):
