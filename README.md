@@ -3,7 +3,7 @@
 A taxonomy-informed sparse DNA foundation model for microbial genomics.
 
 MicroGlot is a 23-layer decoder-only mixture-of-experts transformer pretrained on **378.3 billion
-nucleotides** from **3.70 million sequences** across **99,700 microbial species** — bacteria, archaea,
+nucleotides** from **3.70 million sequences** across **99,700 microbial species**, spanning bacteria, archaea,
 fungi, protists, viruses and plasmids. It encodes the taxonomic hierarchy as hyperbolic (Poincaré)
 embeddings and uses them both as an input token and to steer expert routing.
 
@@ -18,13 +18,24 @@ embeddings and uses them both as an input token and to steer expert routing.
 | **MicroGlot-plain** | DNA | most of your sequences have no known species | `from_pretrained("athanzli/MicroGlot", subfolder="plain", ...)` |
 
 A species is known if it is one of the 99,700 pretraining species (check with `tokenizer.has_species(name)`).
-For tasks that predict taxonomy, use MicroGlot-plain: giving the model the species would reveal the answer.
+For tasks that predict taxonomy, use MicroGlot-plain, because giving the model the species would reveal the answer.
+
+## Model details
+
+| | |
+|---|---|
+| Architecture | decoder-only transformer, next-token prediction |
+| Layers / hidden size | 23 / 1024 |
+| Parameters | 2.98 B, of which 479 M are active per token |
+| Mixture of experts | 312 routed experts across layers (U-shaped), top-1 routing plus a shared expert |
+| Species conditioning | MicroGlot uses a 32-d Poincaré embedding as an input token and to modulate expert routing, and MicroGlot-plain uses none |
+| Context | 8,192 tokens (about 43 kb) |
+| Tokenizer | byte-pair encoding, vocabulary 8,192 |
 
 ## Installation
 
-MicroGlot runs on Linux with an NVIDIA GPU and requires [FlashAttention-2](https://github.com/Dao-AILab/flash-attention)
-(`flash-attn`), whose rotary position-embedding kernel it was trained with. Install everything in a new
-Python 3.12 environment, for example with conda:
+MicroGlot is tested on Linux with an NVIDIA GPU and requires [FlashAttention-2](https://github.com/Dao-AILab/flash-attention)
+(`flash-attn`), whose rotary position-embedding kernel it was trained with.
 
 ```bash
 conda create -n microglot python=3.12 -y
@@ -33,7 +44,7 @@ pip install torch==2.8.0 "transformers>=4.51.3,<5.19"
 pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1%2Bcu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 ```
 
-Tested with Python 3.10–3.13, PyTorch 2.7–2.13, transformers 4.51.3–5.18 and flash-attn 2.7.4–2.8.3.post1.
+Tested with Python 3.10 to 3.13, PyTorch 2.7 to 2.13, transformers 4.51.3 to 5.18 and flash-attn 2.7.4 to 2.8.3.post1.
 For another Python or PyTorch version, install the matching flash-attn wheel from the
 [flash-attn releases](https://github.com/Dao-AILab/flash-attention/releases).
 
@@ -75,7 +86,7 @@ layer_11 = outputs.hidden_states[11]     # [2, length, 1024], decoder layer 11
 If a small portion of your sequences have no known species, you can discard them, so that every
 remaining sequence is given its exact taxonomy embedding. To keep them instead, use the Species-encoder
 to infer their species embeddings from the DNA and fill these gaps. Continuing the MicroGlot example,
-pass `None` as their species:
+pass `None` as their species.
 
 ```python
 model.load_species_encoder()   # downloads the Species-encoder (6 GB) and attaches it to MicroGlot
@@ -91,7 +102,7 @@ If most of your sequences have no known species, use MicroGlot-plain instead.
 
 The context is 8,192 tokens (about 43 kb). To encode a longer sequence, one viable way is "chunk and
 encode", by cutting the sequence into windows that fit the context and encoding each window. Continuing
-the MicroGlot example, the tokenizer does the chunking:
+the MicroGlot example, the tokenizer does the chunking.
 
 ```python
 genome = "ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC" * 3000   # stand-in for a 114 kb sequence
@@ -132,11 +143,11 @@ MicroGlot-plain takes no species; everything else works as for MicroGlot.
 | Path | Description |
 |---|---|
 | `modeling_microglot.py`, `tokenization_microglot.py` | Model and tokenizer code, identical to the copies on Hugging Face |
-| `example.py` | The MicroGlot and MicroGlot-plain examples above as one script: `python example.py` |
+| `example.py` | The MicroGlot and MicroGlot-plain examples above as one script (run `python example.py`) |
 | `taxonomy/` | Scripts that fit the Poincaré taxonomy embeddings and build the species lookup table (run with `--help`) |
-| `training/` | The byte-pair-encoding tokenizer (`tokenizer.py`) and how it was trained: `subsample_bpe_sequences.py` picks one sequence per species, `train_bpe_tokenizer.py` trains it |
+| `training/` | The byte-pair-encoding tokenizer (`tokenizer.py`) and the scripts that trained it (`subsample_bpe_sequences.py` picks one sequence per species and `train_bpe_tokenizer.py` trains the tokenizer) |
 | `benchmarks/baselines.py` | Embedding extractors for the baseline models evaluated in the paper |
-| `benchmarks/layer_sweep.py` | Layer-wise probing: mean-pooled embeddings from every layer and an MLP probe per layer |
+| `benchmarks/layer_sweep.py` | Layer-wise probing with mean-pooled embeddings from every layer and an MLP probe per layer |
 | `benchmarks/finetune_lora.py` | LoRA fine-tuning on the GUE tasks |
 
 ## Licence
