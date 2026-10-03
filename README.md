@@ -61,9 +61,10 @@ last_layer = outputs.last_hidden_state   # [2, length, 1024]
 layer_11 = outputs.hidden_states[11]     # [2, length, 1024], decoder layer 11
 ```
 
-- `species=` takes one name per sequence, or one name for all of them. Case, extra spaces, underscores
-  and hyphens do not matter. A name outside the 99,700 species raises a `KeyError` that suggests close
-  matches.
+- `species=` takes one name per sequence, or one name for all of them. Names are NCBI Taxonomy scientific
+  names (September 2025), e.g. *Clostridioides difficile*. Case and extra spaces do not matter, and `_` or
+  `-` count as spaces. An unknown name raises a `KeyError` listing similarly spelled names; check that a
+  suggestion is the same organism.
 - `outputs.hidden_states[k]` is the output of decoder layer k (1 to 22); `[0]` holds the token
   embeddings, and `[23]` is `last_hidden_state`, the output of layer 23 after the final normalization.
   Intermediate layers often give better features than the last one. All outputs line up with
@@ -128,9 +129,8 @@ MicroGlot-plain takes no species; everything else works as for MicroGlot.
 
 ### DNA input
 
-- Case does not matter. N, the IUPAC ambiguity codes and any other character (spaces, line breaks,
-  `-`, `U`) each become one N token, so pass bare DNA. For RNA, replace U with T; the RNA-virus
-  genomes MicroGlot was trained on are also written with T.
+- Case does not matter. N, the IUPAC ambiguity codes and any other character (spaces, line breaks, `-`)
+  each become one N token, so pass bare DNA.
 - A sequence can have up to 8,192 tokens, [BOS] and [EOS] included (about 43 kb).
 
 ## Repository contents
