@@ -1,5 +1,10 @@
 # MicroGlot
 
+[![bioRxiv](https://img.shields.io/badge/bioRxiv-2026.09.22.753215-b31b1b)](https://www.biorxiv.org/content/10.64898/2026.09.22.753215v2)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-MicroGlot-ffc107)](https://huggingface.co/athanzli/MicroGlot)
+[![Code License: MIT](https://img.shields.io/badge/Code%20License-MIT-f5de53)](LICENSE)
+[![Model License: CC BY 4.0](https://img.shields.io/badge/Model%20License-CC%20BY%204.0-f5de53)](https://huggingface.co/athanzli/MicroGlot/blob/main/LICENSE)
+
 A taxonomy-informed sparse DNA foundation model for microbial genomics.
 
 MicroGlot is a 23-layer decoder-only mixture-of-experts transformer pretrained on **378.3 billion
