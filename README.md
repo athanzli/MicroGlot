@@ -126,8 +126,7 @@ with torch.no_grad():
         window_states = model(**batch).last_hidden_state     # [windows, 8192, 1024]; use them before the next batch
 ```
 
-A single embedding of the whole sequence is then the average of the window embeddings, each mean-pooled over its
-non-padding tokens.
+A single embedding of the whole sequence is then the average of the window embeddings.
 
 ### MicroGlot-plain
 
