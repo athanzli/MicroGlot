@@ -23,7 +23,7 @@ embeddings and uses them both as an input token and to steer expert routing.
 | **MicroGlot-plain** | DNA | most of your sequences have no known species | `from_pretrained("athanzli/MicroGlot", subfolder="plain", ...)` |
 
 A species is known if it is one of the 99,700 pretraining species (check with `tokenizer.has_species(name)`).
-For taxonomic classification tasks, use MicroGlot-plain, as conditioning on the species would leak the label.
+For taxonomic prediction tasks, use MicroGlot-plain, as conditioning on the species would leak the label.
 
 ## Model details
 
