@@ -118,7 +118,9 @@ windows = tokenizer(
     padding=True,                      # pad the last, shorter window with [PAD]
     return_tensors="pt",               # PyTorch tensors, one row per window
 )
-windows.pop("overflow_to_sample_mapping")   # which input each window came from; not a model input
+# The tokenizer also returns "overflow_to_sample_mapping", the index of the input sequence each window came
+# from (all 0 here, since there is one genome). The model does not accept this entry, so remove it.
+windows.pop("overflow_to_sample_mapping")
 
 with torch.no_grad():
     for i in range(0, len(windows["input_ids"]), 4):        # 4 windows at a time
