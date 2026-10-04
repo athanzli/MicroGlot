@@ -81,7 +81,7 @@ last_layer = outputs.last_hidden_state   # [2, length, 1024]
 
 ### Sequences without a known species
 
-If a small portion of your sequences have no known species, you can discard them, so that every
+If a small portion of your sequences have no known species, consider discarding them, so that every
 remaining sequence is given its exact taxonomy embedding. To keep them instead, use the Species-encoder
 to infer their species embeddings from the DNA and fill these gaps. Continuing the MicroGlot example,
 pass `None` as their species.
@@ -105,9 +105,15 @@ the MicroGlot example, the tokenizer does the chunking.
 
 ```python
 genome = "ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC" * 3000   # stand-in for a 114 kb sequence
-windows = tokenizer(genome, species="Escherichia coli", truncation=True, max_length=8192,
-                    return_overflowing_tokens=True, padding=True, return_tensors="pt")
-windows.pop("overflow_to_sample_mapping")   # not a model input
+windows = tokenizer(
+    genome,
+    species="Escherichia coli",        # one species, repeated for every window
+    truncation=True, max_length=8192,  # at most 8,192 tokens per window, [BOS] and [EOS] included
+    return_overflowing_tokens=True,    # return every window (consecutive, non-overlapping), not only the first
+    padding=True,                      # pad the last, shorter window with [PAD]
+    return_tensors="pt",               # PyTorch tensors, one row per window
+)
+windows.pop("overflow_to_sample_mapping")   # which input each window came from; not a model input
 
 with torch.no_grad():
     for i in range(0, len(windows["input_ids"]), 4):        # 4 windows at a time
