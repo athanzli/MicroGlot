@@ -18,8 +18,8 @@ inputs = tokenizer(sequences, species=species, padding=True, return_tensors="pt"
 with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)
 
-last_layer = outputs.last_hidden_state   # [2, length, 1024]
-print("MicroGlot:      ", len(outputs.hidden_states), "hidden states of shape", tuple(last_layer.shape))
+hidden_states = outputs.hidden_states   # 24 x [2, length, 1024]; [0] is the token embeddings, before any decoder layer
+print("MicroGlot:      ", len(hidden_states), "hidden states of shape", tuple(hidden_states[0].shape))
 
 del model, outputs
 torch.cuda.empty_cache()
@@ -36,5 +36,5 @@ inputs = tokenizer(sequences, padding=True, return_tensors="pt").to("cuda")
 with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)
 
-last_layer = outputs.last_hidden_state   # [2, length, 1024]
-print("MicroGlot-plain:", len(outputs.hidden_states), "hidden states of shape", tuple(last_layer.shape))
+hidden_states = outputs.hidden_states   # 24 x [2, length, 1024]; [0] is the token embeddings, before any decoder layer
+print("MicroGlot-plain:", len(hidden_states), "hidden states of shape", tuple(hidden_states[0].shape))

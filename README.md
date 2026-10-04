@@ -73,7 +73,7 @@ inputs = tokenizer(sequences, species=species, padding=True, return_tensors="pt"
 with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)
 
-last_layer = outputs.last_hidden_state   # [2, length, 1024]
+hidden_states = outputs.hidden_states   # 24 x [2, length, 1024]; [0] is the token embeddings, before any decoder layer
 ```
 
 - `species=` takes one name per sequence, or one name for all of them. Names are NCBI Taxonomy scientific
@@ -145,7 +145,7 @@ inputs = tokenizer(sequences, padding=True, return_tensors="pt").to("cuda")
 with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)
 
-last_layer = outputs.last_hidden_state   # [2, length, 1024]
+hidden_states = outputs.hidden_states   # 24 x [2, length, 1024]; [0] is the token embeddings, before any decoder layer
 ```
 
 MicroGlot-plain takes no species; everything else works as for MicroGlot.
