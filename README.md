@@ -23,7 +23,7 @@ embeddings and uses them both as an input token and to steer expert routing.
 | **MicroGlot-plain** | DNA | most of your sequences have no known species | `from_pretrained("athanzli/MicroGlot", subfolder="plain", ...)` |
 
 A species is known if it is one of the 99,700 pretraining species (check with `tokenizer.has_species(name)`).
-For tasks that predict taxonomy, use MicroGlot-plain, because giving the model the species would reveal the answer.
+For taxonomic classification tasks, use MicroGlot-plain, as conditioning on the species would leak the label.
 
 ## Model details
 
@@ -125,6 +125,9 @@ with torch.no_grad():
         batch = {k: v[i:i + 4].to("cuda") for k, v in windows.items()}
         window_states = model(**batch).last_hidden_state     # [windows, 8192, 1024]; use them before the next batch
 ```
+
+A single embedding of the whole sequence is then the average of the window embeddings, each mean-pooled over its
+non-padding tokens.
 
 ### MicroGlot-plain
 
