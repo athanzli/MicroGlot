@@ -19,7 +19,6 @@ with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)
 
 last_layer = outputs.last_hidden_state   # [2, length, 1024]
-layer_11 = outputs.hidden_states[11]     # [2, length, 1024], decoder layer 11
 print("MicroGlot:      ", len(outputs.hidden_states), "hidden states of shape", tuple(last_layer.shape))
 
 del model, outputs

@@ -69,7 +69,6 @@ with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)
 
 last_layer = outputs.last_hidden_state   # [2, length, 1024]
-layer_11 = outputs.hidden_states[11]     # [2, length, 1024], decoder layer 11
 ```
 
 - `species=` takes one name per sequence, or one name for all of them. Names are NCBI Taxonomy scientific
