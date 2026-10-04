@@ -96,7 +96,8 @@ with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)   # the second sequence's species is inferred
 ```
 
-If most of your sequences have no known species, use MicroGlot-plain instead.
+If most of your sequences have no known species, using the Species-encoder to infer their species is not
+recommended due to performance considerations. We recommend using MicroGlot-plain instead.
 
 ### Long sequences
 
