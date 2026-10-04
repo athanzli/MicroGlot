@@ -106,11 +106,14 @@ recommended due to performance considerations. We recommend using MicroGlot-plai
 
 The context is 8,192 tokens (about 43 kb). To encode a longer sequence, one viable way is "chunk and
 encode", by cutting the sequence into windows that fit the context and encoding each window. Continuing
-the MicroGlot example, the code below uses windows of 30,000 nucleotides, about 5,600 tokens each.
+the MicroGlot example, the code below fills each window to the full context of 8,192 tokens.
 
 ```python
 genome = "ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC" * 3000   # stand-in for a 114 kb sequence
-windows = [genome[i:i + 30000] for i in range(0, len(genome), 30000)]
+# the sequence's DNA tokens, without [BOS] and [EOS] (verbose=False skips the length warning)
+ids = tokenizer(genome, add_special_tokens=False, verbose=False)["input_ids"]
+# windows of 8,190 tokens, decoded back to DNA; the tokenizer then adds [BOS] and [EOS], 8,192 in all
+windows = [tokenizer.decode(ids[i:i + 8190]) for i in range(0, len(ids), 8190)]
 
 window_embeddings = []
 with torch.no_grad():
