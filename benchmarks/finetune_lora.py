@@ -12,11 +12,7 @@ yeast species on the epigenetic-mark tasks and MicroGlot-plain on the taxonomic 
 LoRA (r 16, alpha 32, dropout 0.05) on every linear layer; the head standardises the pooled embedding with running
 statistics, then Linear(1024), ReLU, Linear. Each model reads windows of its default context length: a longer sequence
 is split into non-overlapping windows that are trained on as separate examples, and their class probabilities are
-averaged per sequence at test time. Effective batch 32; the head's running statistics are updated once per
-micro-batch, so the split matters. The paper used 32 x 1 except: 8 x 4 on virus/species_40 and fungi/species_20
-(NT-2.5B-multi-species 4 x 8 on both, NT-v2-500M 4 x 8 on fungi/species_20), NT-2.5B-multi-species 16 x 2 on
-virus/covid, Evo2-7B-base 8 x 4, and Evo2-7B-base 8 x 1 on each of 4 GPUs on virus/covid and fungi/species_20
-(multi-GPU training is not part of this script), with --head-norm-floor 0.01 on virus/covid.
+averaged per sequence at test time.
 """
 import argparse
 import json
@@ -127,7 +123,6 @@ def load(model, median_len):
                     mod.flash_attn_qkvpacked_func = None
         return bb, tok, bb.config.hidden_size, "all-linear", default_context(tok, bb.config)
     if model == "Evo2-7B-base":
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from baselines import _evo2_disable_fp8_input_projections, _patch_evo2_flash_attn
         _patch_evo2_flash_attn()  # PyTorch attention and no FP8, as in the probing extractor
         _evo2_disable_fp8_input_projections(models=("evo2_7b_base",))

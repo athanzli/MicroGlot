@@ -25,8 +25,7 @@ from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 from transformers import AutoModel, AutoTokenizer
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import baselines  # noqa: E402
+import baselines
 
 
 class MicroGlotLayers:
