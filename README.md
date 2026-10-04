@@ -123,7 +123,8 @@ windows.pop("overflow_to_sample_mapping")   # which input each window came from;
 with torch.no_grad():
     for i in range(0, len(windows["input_ids"]), 4):        # 4 windows at a time
         batch = {k: v[i:i + 4].to("cuda") for k, v in windows.items()}
-        window_states = model(**batch).last_hidden_state     # [windows, 8192, 1024]; use them before the next batch
+        # 24 x [windows, 8192, 1024]; use them before the next batch
+        window_states = model(**batch, output_hidden_states=True).hidden_states
 ```
 
 A single embedding of the whole sequence is then the average of the window embeddings.
