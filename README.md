@@ -143,23 +143,6 @@ last_layer = outputs.last_hidden_state   # [2, length, 1024]
 
 MicroGlot-plain takes no species; everything else works as for MicroGlot.
 
-## Repository contents
-
-| Path | Description |
-|---|---|
-| `modeling_microglot.py`, `tokenization_microglot.py` | Model and tokenizer code, identical to the copies on Hugging Face |
-| `example.py` | The MicroGlot and MicroGlot-plain examples above as one script (run `python example.py`) |
-| `taxonomy/` | Scripts that fit the Poincaré taxonomy embeddings and build the species lookup table (run with `--help`) |
-| `training/` | The byte-pair-encoding tokenizer (`tokenizer.py`) and the scripts that trained it (`subsample_bpe_sequences.py` picks one sequence per species and `train_bpe_tokenizer.py` trains the tokenizer) |
-| `benchmarks/baselines.py` | Embedding extractors for the baseline models evaluated in the paper |
-| `benchmarks/layer_sweep.py` | Layer-wise probing with mean-pooled embeddings from every layer and an MLP probe per layer |
-| `benchmarks/finetune_lora.py` | LoRA fine-tuning on the GUE tasks |
-
-## Licence
-
-Source code in this repository is released under the [MIT License](LICENSE). The model weights and species
-assets on Hugging Face are released under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-
 ## Citation
 
 > Li, A. Z., Wang, S., Cheng, S., Du, Y. & Liu, R. A Taxonomy-Informed Sparse DNA Foundation Model for Microbial Genomics. *bioRxiv* (2026). https://doi.org/10.64898/2026.09.22.753215
