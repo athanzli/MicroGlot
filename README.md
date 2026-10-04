@@ -106,27 +106,19 @@ recommended due to performance considerations. We recommend using MicroGlot-plai
 
 The context is 8,192 tokens (about 43 kb). To encode a longer sequence, one viable way is "chunk and
 encode", by cutting the sequence into windows that fit the context and encoding each window. Continuing
-the MicroGlot example, the tokenizer does the chunking.
+the MicroGlot example, the code below uses windows of 30,000 nucleotides, about 5,600 tokens each.
 
 ```python
 genome = "ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC" * 3000   # stand-in for a 114 kb sequence
-windows = tokenizer(
-    genome,
-    species="Escherichia coli",        # one species, repeated for every window
-    truncation=True, max_length=8192,  # at most 8,192 tokens per window, [BOS] and [EOS] included
-    return_overflowing_tokens=True,    # return every window (consecutive, non-overlapping), not only the first
-    padding=True,                      # pad the last, shorter window with [PAD]
-    return_tensors="pt",               # PyTorch tensors, one row per window
-)
-# The tokenizer also returns "overflow_to_sample_mapping", the index of the input sequence each window came
-# from (all 0 here, since there is one genome). The model does not accept this entry, so remove it.
-windows.pop("overflow_to_sample_mapping")
+windows = [genome[i:i + 30000] for i in range(0, len(genome), 30000)]
 
+window_embeddings = []
 with torch.no_grad():
-    for i in range(0, len(windows["input_ids"]), 4):        # 4 windows at a time
-        batch = {k: v[i:i + 4].to("cuda") for k, v in windows.items()}
-        # 24 x [windows, 8192, 1024]; use them before the next batch
-        window_states = model(**batch, output_hidden_states=True).hidden_states
+    for window in windows:
+        inputs = tokenizer(window, species="Escherichia coli", return_tensors="pt").to("cuda")
+        hidden_states = model(**inputs, output_hidden_states=True).hidden_states   # 24 x [1, length, 1024]
+        window_embeddings.append(torch.cat(hidden_states).mean(dim=1))             # [24, 1024], mean over tokens
+sequence_embedding = torch.stack(window_embeddings).mean(dim=0)                    # [24, 1024], mean over windows
 ```
 
 A single embedding of the whole sequence is then the average of the window embeddings.
