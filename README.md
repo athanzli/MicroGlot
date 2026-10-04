@@ -78,8 +78,7 @@ layer_11 = outputs.hidden_states[11]     # [2, length, 1024], decoder layer 11
   suggestion is the same organism.
 - `outputs.hidden_states[k]` is the output of decoder layer k (1 to 22); `[0]` holds the token
   embeddings, and `[23]` is `last_hidden_state`, the output of layer 23 after the final normalization.
-  Intermediate layers often give better features than the last one. All outputs line up with
-  `input_ids`; padded positions have `attention_mask` 0.
+  All outputs line up with `input_ids`; padded positions have `attention_mask` 0.
 
 ### Sequences without a known species
 
