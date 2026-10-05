@@ -77,9 +77,9 @@ hidden_states = outputs.hidden_states   # 24 x [2, length, 1024]; [0] is the tok
 ```
 
 - `species=` takes one name per sequence, or one name for all of them. Names are NCBI Taxonomy scientific
-  names (September 2025), e.g. *Clostridioides difficile*. Case and extra spaces do not matter, and `_` or
-  `-` count as spaces. An unknown name raises a `KeyError` listing similarly spelled names; check that a
-  suggestion is the same organism.
+  names (September 2025), e.g. *Clostridioides difficile*. Use species-level NCBI names; `tokenizer.species_names`
+  lists all 99,700. Case and extra spaces do not matter, and `_` or `-` count as spaces. An unknown name raises a
+  `KeyError` listing similarly spelled names; check that a suggestion is the same organism.
 - `outputs.hidden_states[k]` is the output of decoder layer k (1 to 22); `[0]` holds the token
   embeddings, and `[23]` is `last_hidden_state`, the output of layer 23 after the final normalization.
   All outputs line up with `input_ids`; padded positions have `attention_mask` 0.

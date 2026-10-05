@@ -37,7 +37,7 @@ class MicroGlotLayers:
         sub = {"subfolder": "plain"} if plain else {}
         self.tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, **sub)
         self.model = AutoModel.from_pretrained("athanzli/MicroGlot", trust_remote_code=True,
-                                               torch_dtype=torch.bfloat16, **sub).cuda().eval()
+                                               dtype=torch.bfloat16, **sub).cuda().eval()
         if not plain and (species is None or (species < 0).any()):
             self.model.load_species_encoder()
         self.context = self.tokenizer.model_max_length

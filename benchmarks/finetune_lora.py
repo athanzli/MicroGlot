@@ -12,9 +12,11 @@ yeast species on the epigenetic-mark tasks and MicroGlot-plain on the taxonomic 
 LoRA (r 16, alpha 32, dropout 0.05) on every linear layer; the head standardises the pooled embedding with running
 statistics, then Linear(1024), ReLU, Linear. Each model reads windows of its default context length: a longer sequence
 is split into non-overlapping windows that are trained on as separate examples, and their class probabilities are
-averaged per sequence at test time.
+averaged per sequence at test time. --lr and --warmup-steps default to the paper's values (1e-4, 500), set for
+GUE-sized data; with a few hundred sequences, use a short warmup such as --warmup-steps 10.
 """
 import argparse
+import inspect
 import json
 import os
 import re
@@ -109,7 +111,7 @@ def load(model, median_len):
     if model.startswith("MicroGlot"):
         sub = {"subfolder": "plain"} if model == "MicroGlot-plain" else {}
         tok = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, **sub)
-        bb = AutoModel.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, torch_dtype=torch.bfloat16, **sub)
+        bb = AutoModel.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, dtype=torch.bfloat16, **sub)
         return bb, tok, bb.config.hidden_size, linear_layers(bb), tok.model_max_length
     if model in ENCODERS:
         tok = AutoTokenizer.from_pretrained(ENCODERS[model], trust_remote_code=True)
@@ -256,6 +258,8 @@ def main():
     ap.add_argument("--batch", type=int, default=32, help="batch per step; batch x accum = 32 in the paper")
     ap.add_argument("--accum", type=int, default=1)
     ap.add_argument("--epochs", type=int, default=100)
+    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--warmup-steps", type=int, default=500, help="500 in the paper; far fewer for a small dataset")
     ap.add_argument("--grad-ckpt", action="store_true")
     ap.add_argument("--head-norm-floor", type=float, default=1e-3, help="lower bound of the head's running std")
     args = ap.parse_args()
@@ -287,14 +291,15 @@ def main():
           f"{len(data['train'])} training windows", flush=True)
 
     out = os.path.join(args.out, f"{args.model}__{args.task.replace('/', '_')}")
+    # transformers 5 always saves safetensors and no longer takes the argument
+    old = {"save_safetensors": False} if "save_safetensors" in inspect.signature(TrainingArguments).parameters else {}
     targs = TrainingArguments(
         output_dir=out, seed=args.seed, num_train_epochs=args.epochs, per_device_train_batch_size=args.batch,
-        gradient_accumulation_steps=args.accum, per_device_eval_batch_size=max(8, args.batch), learning_rate=1e-4,
-        lr_scheduler_type="cosine_with_min_lr", lr_scheduler_kwargs={"min_lr": 1e-5}, warmup_steps=500,
+        gradient_accumulation_steps=args.accum, per_device_eval_batch_size=max(8, args.batch), learning_rate=args.lr,
+        lr_scheduler_type="cosine_with_min_lr", lr_scheduler_kwargs={"min_lr": 1e-5}, warmup_steps=args.warmup_steps,
         weight_decay=0.01, optim="adamw_torch", max_grad_norm=1.0, bf16=True, eval_strategy="epoch",
         save_strategy="epoch", save_total_limit=2, load_best_model_at_end=True, metric_for_best_model="eval_loss",
-        greater_is_better=False, logging_steps=50, report_to=[], remove_unused_columns=False,
-        save_safetensors=False)
+        greater_is_better=False, logging_strategy="epoch", report_to=[], remove_unused_columns=False, **old)
     test_each_epoch = TestEachEpoch(data["test"], n_classes)
     trainer = Trainer(model=model, args=targs, train_dataset=data["train"], eval_dataset=data["dev"],
                       data_collator=collate(tok.pad_token_id or 0),

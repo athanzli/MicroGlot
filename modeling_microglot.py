@@ -1391,8 +1391,8 @@ class MicroGlotModel(MicroGlotPreTrainedModel):
         if seq_len > max_trained:
             warnings.warn(
                 f"Input sequence length ({seq_len} tokens) exceeds the maximum length seen during "
-                f"pretraining ({max_trained} tokens); split long sequences into windows "
-                "(tokenizer(..., truncation=True, max_length=8192, return_overflowing_tokens=True)).",
+                f"pretraining ({max_trained} tokens); split long sequences into windows as shown under "
+                "\"Long sequences\" at https://huggingface.co/athanzli/MicroGlot.",
                 UserWarning,
                 stacklevel=3,
             )
