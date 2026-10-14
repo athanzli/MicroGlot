@@ -52,7 +52,7 @@ except ImportError as _flash_attn_error:
     ) from _flash_attn_error
 
 from transformers import PretrainedConfig, PreTrainedModel
-from transformers.modeling_outputs import CausalLMOutputWithPast, ModelOutput
+from transformers.modeling_outputs import ModelOutput
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
@@ -82,11 +82,21 @@ class MicroGlotModelOutput(ModelOutput):
 
 
 @dataclass
-class MicroGlotCausalLMOutput(CausalLMOutputWithPast):
-    """``CausalLMOutputWithPast`` plus the species vectors used (``species_embeds``, appended after the
-    standard fields). ``past_key_values`` and ``attentions`` are always None (MicroGlot has no KV cache)."""
+class MicroGlotCausalLMOutput(ModelOutput):
+    """Next-token output of ``MicroGlotForCausalLM``.
 
+    loss: with ``labels``, the mean next-token cross-entropy (plus ``moe_loss`` with ``output_router_logits=True``).
+    logits: ``[batch, length, vocab]`` next-token logits.
+    hidden_states: as in ``MicroGlotModelOutput`` (with ``skip_lm_head=True``, the final hidden state only).
+    species_embeds: ``[batch, 32]`` unit-norm species vectors actually used (None for MicroGlot-plain).
+    moe_loss: with ``output_router_logits=True``, the router load-balancing loss (as in ``MicroGlotModelOutput``).
+    """
+
+    loss: Optional[torch.FloatTensor] = None
+    logits: Optional[torch.FloatTensor] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     species_embeds: Optional[torch.FloatTensor] = None
+    moe_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -1528,17 +1538,18 @@ class MicroGlotForCausalLM(MicroGlotPreTrainedModel):
     ) -> Union[Tuple, MicroGlotCausalLMOutput]:
         """Next-token logits `[batch, length, vocab]`; the species arguments are those of `MicroGlotModel.forward`.
 
-        labels (`LongTensor` `[batch, length]`, -100 = ignored): `loss` = mean next-token cross-entropy, plus the
-            router loss (`moe_loss`) unless `output_router_logits=False`. With a species token the first
-            prediction (made at [BOS], before the model has seen the species) is excluded, as in pretraining.
+        labels (`LongTensor` `[batch, length]`, -100 = ignored): `loss` = mean next-token cross-entropy. With a
+            species token the first prediction (made at [BOS], before the model has seen the species) is excluded,
+            as in pretraining.
+        output_router_logits: also compute the router load-balancing loss (`moe_loss`) and add it to `loss`, as in
+            pretraining (default: off). Pass True when training this model, so that the experts stay balanced.
         skip_lm_head: return only the final hidden state (in `hidden_states`).
         return_dict=False returns the tuple `([loss,] logits, hidden_states, moe_loss)`.
         """
         return_dict = return_dict if return_dict is not None else self.config.return_dict
-        output_router_logits = (
-            output_router_logits if output_router_logits is not None
-            else self.config.use_moe
-        )
+        # Off by default, as in transformers' mixture-of-experts language models: `loss` is the next-token
+        # cross-entropy only. The hidden states and logits do not depend on this flag.
+        output_router_logits = bool(output_router_logits)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1586,6 +1597,7 @@ class MicroGlotForCausalLM(MicroGlotPreTrainedModel):
             logits=logits,
             hidden_states=outputs.hidden_states,
             species_embeds=outputs.species_embeds,
+            moe_loss=outputs.moe_loss,
         )
 
 
