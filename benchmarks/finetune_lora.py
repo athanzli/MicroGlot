@@ -109,7 +109,7 @@ class Evo2Backbone(nn.Module):
 def load(model, median_len):
     """-> backbone, tokenizer, hidden size, LoRA target modules, context length (tokens)."""
     if model.startswith("MicroGlot"):
-        sub = {"subfolder": "plain"} if model == "MicroGlot-plain" else {}
+        sub = {"revision": "main", **({"subfolder": "plain"} if model == "MicroGlot-plain" else {})}
         tok = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, **sub)
         bb = AutoModel.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, dtype=torch.bfloat16, **sub)
         return bb, tok, bb.config.hidden_size, linear_layers(bb), tok.model_max_length

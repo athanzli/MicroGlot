@@ -39,19 +39,17 @@ For taxonomic prediction tasks, use MicroGlot-plain, as conditioning on the spec
 
 ## Installation
 
-MicroGlot is tested on Linux with an NVIDIA GPU and requires [FlashAttention-2](https://github.com/Dao-AILab/flash-attention)
-(`flash-attn`), whose rotary position-embedding kernel it was trained with.
+MicroGlot is tested on Linux with an NVIDIA GPU.
 
 ```bash
 conda create -n microglot python=3.12 -y
 conda activate microglot
-pip install torch==2.8.0 "transformers>=4.51.3,<5.19"
-pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1%2Bcu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+pip install "torch>=2.7" "transformers>=4.49"
 ```
 
-Tested with Python 3.10 to 3.13, PyTorch 2.7 to 2.13, transformers 4.51.3 to 5.18 and flash-attn 2.7.4 to 2.8.3.post1.
-For another Python or PyTorch version, install the matching flash-attn wheel from the
-[flash-attn releases](https://github.com/Dao-AILab/flash-attention/releases).
+Tested with Python 3.9 to 3.14, PyTorch 2.7 to 2.15 and transformers 4.49 to 5.22. The newest PyTorch on PyPI is
+built for CUDA 13 and needs NVIDIA driver 580 or later. With an older driver, install a PyTorch build for your CUDA
+version from [pytorch.org](https://pytorch.org/get-started/locally/).
 
 ## Usage
 
@@ -61,9 +59,9 @@ For another Python or PyTorch version, install the matching flash-attn wheel fro
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, revision="main")
 model = AutoModel.from_pretrained(
-    "athanzli/MicroGlot", trust_remote_code=True, dtype=torch.bfloat16
+    "athanzli/MicroGlot", trust_remote_code=True, revision="main", dtype=torch.bfloat16
 ).to("cuda")
 
 sequences = ["ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC", "TTGACAGCTAGCTCAGTCCTAGGTATAATGCTAGC"]
@@ -132,9 +130,9 @@ A single embedding of the whole sequence is then the average of the window embed
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", subfolder="plain", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", subfolder="plain", trust_remote_code=True, revision="main")
 model = AutoModel.from_pretrained(
-    "athanzli/MicroGlot", subfolder="plain", trust_remote_code=True, dtype=torch.bfloat16
+    "athanzli/MicroGlot", subfolder="plain", trust_remote_code=True, revision="main", dtype=torch.bfloat16
 ).to("cuda")
 
 sequences = ["ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC", "TTGACAGCTAGCTCAGTCCTAGGTATAATGCTAGC"]

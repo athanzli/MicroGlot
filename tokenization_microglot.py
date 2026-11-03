@@ -13,10 +13,18 @@ import re
 import unicodedata
 from typing import List, Optional, Sequence, Union
 
+import transformers
+from packaging import version
 from transformers import PreTrainedTokenizerFast
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
+
+# The tokenizer loads first in the examples: check here too, so that old installations get this message rather
+# than a tokenizers parse error (tokenizer.json needs tokenizers >= 0.20, i.e. transformers >= 4.45).
+if version.parse(transformers.__version__).release < (4, 49):
+    raise ImportError(f"MicroGlot requires transformers 4.49 or later (found {transformers.__version__}). "
+                      "See https://huggingface.co/athanzli/MicroGlot#installation.")
 
 UNKNOWN_SPECIES_ID = -1
 

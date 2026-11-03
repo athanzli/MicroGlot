@@ -34,7 +34,7 @@ class MicroGlotLayers:
     supports_chunk_batching = True
 
     def __init__(self, plain, species):
-        sub = {"subfolder": "plain"} if plain else {}
+        sub = {"revision": "main", **({"subfolder": "plain"} if plain else {})}
         self.tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, **sub)
         self.model = AutoModel.from_pretrained("athanzli/MicroGlot", trust_remote_code=True,
                                                dtype=torch.bfloat16, **sub).cuda().eval()
@@ -207,7 +207,7 @@ def main():
 
     species = None
     if args.model == "MicroGlot":
-        tok = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True)
+        tok = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, revision="main")
         names = df["species"].where(df["species"].notna(), None) if "species" in df else [None] * len(df)
         species = np.array(tok.convert_species_to_ids(list(names), unknown_species="infer"))
     enc = (MicroGlotLayers(args.model == "MicroGlot-plain", species) if args.model.startswith("MicroGlot")

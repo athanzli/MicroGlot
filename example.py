@@ -6,9 +6,9 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 
 # MicroGlot: DNA and its species
-tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", trust_remote_code=True, revision="main")
 model = AutoModel.from_pretrained(
-    "athanzli/MicroGlot", trust_remote_code=True, dtype=torch.bfloat16
+    "athanzli/MicroGlot", trust_remote_code=True, revision="main", dtype=torch.bfloat16
 ).to("cuda")
 
 sequences = ["ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC", "TTGACAGCTAGCTCAGTCCTAGGTATAATGCTAGC"]
@@ -25,9 +25,9 @@ del model, outputs
 torch.cuda.empty_cache()
 
 # MicroGlot-plain: DNA only
-tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", subfolder="plain", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained("athanzli/MicroGlot", subfolder="plain", trust_remote_code=True, revision="main")
 model = AutoModel.from_pretrained(
-    "athanzli/MicroGlot", subfolder="plain", trust_remote_code=True, dtype=torch.bfloat16
+    "athanzli/MicroGlot", subfolder="plain", trust_remote_code=True, revision="main", dtype=torch.bfloat16
 ).to("cuda")
 
 sequences = ["ATGAGTAAAGGAGAAGAACTTTTCACTGGAGTTGTCCC", "TTGACAGCTAGCTCAGTCCTAGGTATAATGCTAGC"]

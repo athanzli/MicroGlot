@@ -1,10 +1,8 @@
-# MicroGlot needs Linux, an NVIDIA GPU and Python 3.12: the flash-attn wheel below is built for Python 3.12,
-# PyTorch 2.8 and CUDA 12. In a new Python 3.12 environment, pip install -r requirements.txt installs what the
-# README's installation does. For another Python or PyTorch version, see README.md#installation.
+# MicroGlot needs Linux and an NVIDIA GPU. pip install -r requirements.txt installs what the README's
+# installation does; README.md#installation lists the tested versions.
 
-torch==2.8.0
-transformers>=4.51.3,<5.19
-flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1%2Bcu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+torch>=2.7
+transformers>=4.49
 
 # Required by the taxonomy scripts (Poincare embedding construction); not needed to run the model.
 numpy
