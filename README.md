@@ -95,6 +95,8 @@ model.load_species_encoder()   # downloads the Species-encoder (6 GB) and attach
 inputs = tokenizer(sequences, species=["Escherichia coli", None], padding=True, return_tensors="pt").to("cuda")
 with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)   # the second sequence's species is inferred
+
+hidden_states = outputs.hidden_states
 ```
 
 If most of your sequences have no known species, using the Species-encoder to infer their species is not

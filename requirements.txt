@@ -1,6 +1,3 @@
-# MicroGlot needs Linux and an NVIDIA GPU. pip install -r requirements.txt installs what the README's
-# installation does; README.md#installation lists the tested versions.
-
 torch>=2.7
 transformers>=4.49
 
